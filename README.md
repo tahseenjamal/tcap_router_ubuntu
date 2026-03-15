@@ -11,7 +11,7 @@ It is designed to run **behind Osmocom STP (`osmo-stp`)**, which handles the ful
 * SCCP routing
 * SS7 network management
 
-This router focuses **only on TCAP dialog routing**, enabling scalable backend clusters for telecom services such as:
+The router itself focuses **only on TCAP dialog routing**, enabling scalable backend clusters for telecom services such as:
 
 * USSD platforms
 * MAP / HLR / HSS services
@@ -28,7 +28,7 @@ The router guarantees **dialog stickiness**, meaning all TCAP messages belonging
 ```
 SS7 Network
       │
-      │  SCTP / M3UA
+      │ SCTP / M3UA
       ▼
 +-------------+
 |  osmo-stp   |
@@ -60,19 +60,19 @@ SS7 Network
 
 ## Separation of Responsibilities
 
-| Component       | Responsibility                   |
-| --------------- | -------------------------------- |
-| **osmo-stp**    | SIGTRAN stack (SCTP, M3UA, SCCP) |
-| **TCAP Router** | Dialog-aware TCAP load balancing |
-| **Backends**    | Telecom application logic        |
+| Component       | Responsibility                     |
+| --------------- | ---------------------------------- |
+| **osmo-stp**    | SIGTRAN stack (SCTP + M3UA + SCCP) |
+| **TCAP Router** | Dialog-aware TCAP load balancing   |
+| **Backends**    | Telecom application logic          |
 
-This separation keeps the router **lightweight, deterministic, and scalable**.
+This keeps the router **lightweight, deterministic, and scalable**.
 
 ---
 
 # TCAP Dialog Routing
 
-TCAP dialogs use three primary message types:
+TCAP dialogs contain the following message types:
 
 | Message  | Tag    |
 | -------- | ------ |
@@ -87,11 +87,11 @@ OTID – Originating Transaction ID
 DTID – Destination Transaction ID
 ```
 
-Routing logic:
+Routing algorithm:
 
 ```
 BEGIN
-   → choose backend (round robin)
+   → choose backend (round-robin)
    → store OTID → backend mapping
 
 CONTINUE / END
@@ -111,12 +111,12 @@ Dialogs are distributed across worker threads using:
 worker = (OTID ^ DTID) % MAX_WORKERS
 ```
 
-Advantages:
+Benefits:
 
-* consistent dialog processing
 * CPU cache locality
 * lock-free worker queues
-* no cross-worker synchronization
+* consistent dialog handling
+* minimal synchronization
 
 ---
 
@@ -157,7 +157,7 @@ File:
 sigtran/sigtran_stack.c
 ```
 
-Registers the router as an SCCP user in the Osmocom stack.
+Registers the router as an SCCP user inside the Osmocom stack:
 
 ```
 osmo_sccp_user_bind(sccp, "tcap-router", sccp_prim_cb, 146);
@@ -187,9 +187,9 @@ Features:
 
 * lock-free ring buffers
 * one queue per worker
-* worker affinity based on dialog ID
+* dialog-based worker affinity
 * atomic queue pointers
-* drop counter for overflow protection
+* queue drop counter
 
 Queue overflow increments:
 
@@ -219,10 +219,10 @@ Features:
 
 * hash table with **262,144 buckets**
 * per-bucket locking
-* automatic dialog garbage collection
+* dialog garbage collector thread
 * configurable timeout (`TX_TIMEOUT`)
 
-Expired dialogs are removed automatically.
+Expired dialogs are automatically removed.
 
 ---
 
@@ -234,7 +234,7 @@ File:
 router/router.c
 ```
 
-Pipeline:
+Processing pipeline:
 
 ```
 SCCP message
@@ -256,7 +256,7 @@ XUDT (0x11)
 LUDT (0x13)
 ```
 
-The parser includes **pointer validation to prevent malformed packet crashes**.
+Pointer validation prevents malformed SCCP packets from crashing the router.
 
 ---
 
@@ -272,7 +272,7 @@ Maintains persistent connections to backend TCAP servers.
 
 Features:
 
-* round-robin load balancing
+* round-robin backend selection
 * atomic backend state
 * connection failure detection
 * automatic reconnect thread
@@ -284,7 +284,7 @@ Example backend configuration:
 127.0.0.1:4001
 ```
 
-Backend failure flow:
+Failure handling:
 
 ```
 send() failure
@@ -298,19 +298,21 @@ health thread reconnects
 
 # Performance
 
-Expected throughput on modern hardware:
+Expected performance on modern servers:
 
-| CPU      | Throughput |
-| -------- | ---------- |
-| 4 cores  | ~80k TPS   |
-| 8 cores  | ~150k TPS  |
-| 16 cores | ~300k TPS  |
+| CPU      | TCAP Dialog TPS |
+| -------- | --------------- |
+| 4 cores  | ~80k            |
+| 8 cores  | ~150k           |
+| 16 cores | ~300k           |
 
-With kernel tuning:
+With kernel tuning and optimized backends:
 
 ```
->500k TCAP TPS
+>500k TCAP messages/sec
 ```
+
+Actual limits are often **determined by osmo-stp throughput**.
 
 ---
 
@@ -331,17 +333,26 @@ Tested on:
 
 Required Osmocom libraries:
 
-| Library         | Purpose        |
-| --------------- | -------------- |
-| libosmocore     | core utilities |
-| libosmo-sccp    | SCCP stack     |
-| libosmo-sigtran | M3UA / SIGTRAN |
+| Library         | Purpose           |
+| --------------- | ----------------- |
+| libosmocore     | core utilities    |
+| libosmo-sccp    | SCCP stack        |
+| libosmo-sigtran | SIGTRAN protocols |
 
-Optional:
+Install base dependencies:
 
-| Component | Purpose             |
-| --------- | ------------------- |
-| osmo-stp  | SS7 STP for testing |
+```
+sudo apt update
+
+sudo apt install -y \
+build-essential \
+libsctp-dev \
+pkg-config \
+libosmocore-dev \
+libosmo-sccp-dev \
+libosmo-sigtran-dev \
+osmo-stp
+```
 
 ---
 
@@ -360,15 +371,23 @@ Compile:
 make
 ```
 
+Binary produced:
+
+```
+tcap-router
+```
+
 ---
 
-# Run
+# Running the Router
+
+Start the router:
 
 ```
 ./tcap-router
 ```
 
-Expected startup output:
+Expected output:
 
 ```
 Starting TCAP Router
@@ -376,6 +395,100 @@ Initializing SS7 + SCCP stack
 SCCP stack initialized
 Backend 0 connected
 Backend 1 connected
+```
+
+---
+
+# Configuring osmo-stp
+
+The router receives SCCP traffic via **SSN 146**.
+
+Install STP:
+
+```
+sudo apt install osmo-stp
+```
+
+Create configuration:
+
+```
+sudo nano /etc/osmocom/osmo-stp.cfg
+```
+
+Example configuration:
+
+```
+log stderr
+ logging level debug
+
+cs7 instance 0
+ point-code 0.0.1
+
+ asp asp1 2905 0 m3ua
+  remote-ip 127.0.0.1
+  role asp
+
+ as as1 m3ua
+  asp asp1
+  routing-key 1 0.0.0
+
+sccp
+
+ sccp-address local
+  point-code 0.0.1
+  ssn 146
+
+ sccp-routing
+  route on ssn 146
+   destination local
+```
+
+This tells the STP:
+
+```
+All SCCP traffic for SSN 146 → deliver locally
+```
+
+Your router registers the same SSN internally:
+
+```
+osmo_sccp_user_bind(..., 146);
+```
+
+---
+
+# Starting osmo-stp
+
+Run:
+
+```
+sudo osmo-stp -c /etc/osmocom/osmo-stp.cfg
+```
+
+Expected log:
+
+```
+SCCP initialized
+M3UA stack initialized
+```
+
+---
+
+# Traffic Flow
+
+```
+SS7 Network
+    │
+    │ M3UA
+    ▼
+osmo-stp
+    │
+    │ SCCP SSN 146
+    ▼
+TCAP Router
+    │
+    ▼
+Backend TCAP Servers
 ```
 
 ---
@@ -388,11 +501,11 @@ Capture traffic:
 sudo tcpdump -i any port 2905 -w sigtran.pcap
 ```
 
-Test sources:
+Possible test sources:
 
 * osmo-stp
 * SS7 simulators
-* TCAP traffic generators
+* custom TCAP generators
 
 ---
 
@@ -402,24 +515,34 @@ Test sources:
 | ------------------------ | ----------- |
 | Dialog-aware routing     | Implemented |
 | Worker thread pool       | Implemented |
-| Lock-free worker queues  | Implemented |
+| Lock-free queues         | Implemented |
 | Transaction table        | Implemented |
 | Backend reconnect logic  | Implemented |
 | Atomic backend state     | Implemented |
 | SCCP validation          | Implemented |
 | Dialog garbage collector | Implemented |
-| Metrics counters         | Partial     |
 
 ---
 
 # Future Improvements
 
-Possible next steps:
+Planned enhancements:
 
 * Prometheus metrics
-* backend configuration file
-* dynamic backend discovery
+* dynamic backend configuration
 * SCTP multi-homing
 * congestion control
+* cluster deployment
 * SS7 statistics interface
 
+---
+
+# License
+
+MIT License
+
+---
+
+# Author
+
+**Tahseen Jamal**
