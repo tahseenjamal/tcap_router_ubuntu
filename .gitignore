@@ -12,13 +12,6 @@
 tcap-router
 *.out
 
-# Debug / core dumps
-
-core
-core.*
-*.core
-
-# GDB / debugging
 
 gmon.out
 

@@ -1,26 +1,25 @@
-
 # TCAP Router (Dialog-Aware Load Balancer)
 
 ## Overview
 
-This project implements a **high-performance TCAP dialog load balancer** written in C.
+This project implements a **high-performance TCAP dialog load balancer written in C**.
 
-It is designed to work together with **Osmocom STP (`osmo-stp`)**, which handles the full SIGTRAN stack:
+It is designed to run **behind Osmocom STP (`osmo-stp`)**, which handles the full **SIGTRAN protocol stack**:
 
 * SCTP
 * M3UA
 * SCCP routing
 * SS7 network management
 
-The router implemented here **focuses only on TCAP dialog routing**, enabling scalable backend application clusters for telecom services such as:
+This router focuses **only on TCAP dialog routing**, enabling scalable backend clusters for telecom services such as:
 
-* USSD
-* MAP (HLR / HSS)
-* SMS routing
+* USSD platforms
+* MAP / HLR / HSS services
+* SMS routing systems
 * CAMEL / IN services
-* Diameter interworking gateways
+* SS7 ↔ Diameter gateways
 
-The router ensures **dialog stickiness**, meaning all TCAP messages belonging to the same dialog are always routed to the same backend node.
+The router guarantees **dialog stickiness**, meaning all TCAP messages belonging to the same dialog are always routed to the same backend application.
 
 ---
 
@@ -40,10 +39,10 @@ SS7 Network
       ▼
 +----------------------+
 |  TCAP Router         |
-|  (this project)      |
 |                      |
 |  - TCAP parsing      |
 |  - dialog hashing    |
+|  - worker dispatch   |
 |  - backend routing   |
 +----------------------+
       │
@@ -59,21 +58,21 @@ SS7 Network
 
 # Key Design Principles
 
-### 1. Separation of Responsibilities
+## Separation of Responsibilities
 
-| Component       | Responsibility                     |
-| --------------- | ---------------------------------- |
-| **osmo-stp**    | SIGTRAN stack (SCTP + M3UA + SCCP) |
-| **TCAP Router** | Dialog-aware TCAP load balancing   |
-| **Backends**    | Application logic                  |
+| Component       | Responsibility                   |
+| --------------- | -------------------------------- |
+| **osmo-stp**    | SIGTRAN stack (SCTP, M3UA, SCCP) |
+| **TCAP Router** | Dialog-aware TCAP load balancing |
+| **Backends**    | Telecom application logic        |
 
-This keeps the router **lightweight and scalable**.
+This separation keeps the router **lightweight, deterministic, and scalable**.
 
 ---
 
-### 2. Dialog Stickiness
+# TCAP Dialog Routing
 
-TCAP dialogs consist of:
+TCAP dialogs use three primary message types:
 
 | Message  | Tag    |
 | -------- | ------ |
@@ -84,37 +83,40 @@ TCAP dialogs consist of:
 The router extracts:
 
 ```
-OTID (Originating Transaction ID)
-DTID (Destination Transaction ID)
+OTID – Originating Transaction ID
+DTID – Destination Transaction ID
 ```
 
 Routing logic:
 
 ```
-Begin → select backend (round-robin)
-      → store OTID → backend mapping
+BEGIN
+   → choose backend (round robin)
+   → store OTID → backend mapping
 
-Continue/End → lookup DTID
-             → route to same backend
+CONTINUE / END
+   → lookup DTID
+   → route to same backend
 ```
 
 This guarantees **dialog affinity**.
 
 ---
 
-### 3. Worker Affinity
+# Worker Affinity
 
-Incoming dialogs are distributed across workers using:
+Dialogs are distributed across worker threads using:
 
 ```
 worker = (OTID ^ DTID) % MAX_WORKERS
 ```
 
-Benefits:
+Advantages:
 
-* CPU cache locality
-* zero locking between workers
 * consistent dialog processing
+* CPU cache locality
+* lock-free worker queues
+* no cross-worker synchronization
 
 ---
 
@@ -124,7 +126,6 @@ Benefits:
 tcap_router/
 │
 ├── main.c
-│
 ├── config.h
 │
 ├── sigtran/
@@ -142,10 +143,6 @@ tcap_router/
 │   ├── backend_pool.h
 │   ├── transaction_table.c
 │   └── transaction_table.h
-│
-└── network/
-    ├── sctp_server.c
-    └── sctp_server.h
 ```
 
 ---
@@ -154,73 +151,84 @@ tcap_router/
 
 ## SIGTRAN Integration
 
+File:
+
 ```
 sigtran/sigtran_stack.c
 ```
 
-Registers an SCCP user with `osmo-stp`.
+Registers the router as an SCCP user in the Osmocom stack.
 
 ```
 osmo_sccp_user_bind(sccp, "tcap-router", sccp_prim_cb, 146);
 ```
 
-When SCCP traffic arrives:
+Incoming flow:
 
 ```
 SCCP primitive
    ↓
-extract OTID
+TCAP parser
    ↓
-enqueue to worker
+worker_enqueue()
 ```
 
 ---
 
 # Worker Pool
 
+File:
+
 ```
 core/worker_pool.c
 ```
 
-Implements:
+Features:
 
 * lock-free ring buffers
 * one queue per worker
 * worker affinity based on dialog ID
+* atomic queue pointers
+* drop counter for overflow protection
 
-Workers process jobs:
+Queue overflow increments:
 
 ```
-route_tcap()
+queue_drops
 ```
+
+instead of silently losing packets.
 
 ---
 
 # Transaction Table
 
+File:
+
 ```
 core/transaction_table.c
 ```
 
-Maintains mapping:
+Maintains dialog stickiness:
 
 ```
 OTID → backend
 ```
 
-Used to ensure dialog stickiness.
-
 Features:
 
-* hash table (262k buckets)
-* bucket locking
-* garbage collector thread
+* hash table with **262,144 buckets**
+* per-bucket locking
+* automatic dialog garbage collection
+* configurable timeout (`TX_TIMEOUT`)
 
 Expired dialogs are removed automatically.
 
 ---
 
 # TCAP Routing
+
+File:
 
 ```
 router/router.c
@@ -233,49 +241,64 @@ SCCP message
    ↓
 extract SCCP user data
    ↓
-parse TCAP
+parse TCAP message
    ↓
-determine message type
+determine dialog type
    ↓
 route to backend
 ```
 
-Routing logic:
+Supported SCCP message types:
 
 ```
-Begin     → choose backend
-Continue  → lookup DTID
-End       → lookup DTID
+UDT  (0x09)
+XUDT (0x11)
+LUDT (0x13)
 ```
+
+The parser includes **pointer validation to prevent malformed packet crashes**.
 
 ---
 
 # Backend Pool
 
+File:
+
 ```
 core/backend_pool.c
 ```
 
-Maintains active backend connections.
+Maintains persistent connections to backend TCAP servers.
 
-Selection algorithm:
+Features:
 
-```
-round robin
-```
+* round-robin load balancing
+* atomic backend state
+* connection failure detection
+* automatic reconnect thread
 
-Example backend setup:
+Example backend configuration:
 
 ```
 127.0.0.1:4000
 127.0.0.1:4001
 ```
 
+Backend failure flow:
+
+```
+send() failure
+     ↓
+backend marked inactive
+     ↓
+health thread reconnects
+```
+
 ---
 
 # Performance
 
-Expected throughput on modern servers:
+Expected throughput on modern hardware:
 
 | CPU      | Throughput |
 | -------- | ---------- |
@@ -283,20 +306,11 @@ Expected throughput on modern servers:
 | 8 cores  | ~150k TPS  |
 | 16 cores | ~300k TPS  |
 
-With further tuning:
+With kernel tuning:
 
 ```
-> 500k TCAP TPS
+>500k TCAP TPS
 ```
-
----
-
-# TCAP Router
-
-A lightweight **TCAP routing / load-balancing framework** built on top of the **Osmocom SIGTRAN stack**.
-This project focuses on routing **TCAP transactions based on OTID hashing** to backend TCAP application servers.
-
-The goal is to eventually evolve this into a **carrier-grade TCAP router for SIGTRAN networks**.
 
 ---
 
@@ -304,251 +318,36 @@ The goal is to eventually evolve this into a **carrier-grade TCAP router for SIG
 
 Tested on:
 
-| Component    | Version          |
-| ------------ | ---------------- |
-| OS           | Ubuntu 24.04 LTS |
-| GCC          | 13.x             |
-| Kernel       | 6.x              |
-| Architecture | x86_64           |
+| Component    | Version      |
+| ------------ | ------------ |
+| OS           | Ubuntu 24.04 |
+| GCC          | 13+          |
+| Kernel       | 6.x          |
+| Architecture | x86_64       |
 
 ---
 
-# High Level Architecture
+# Dependencies
 
-```
-Telco Network
-      │
-      │ M3UA / SCCP / TCAP
-      ▼
-┌─────────────────────┐
-│ TCAP Router         │
-│                     │
-│  OTID Hash          │
-│  Worker Pool        │
-│  Message Dispatch   │
-└─────────┬───────────┘
-          │
-          │ TCP
-          ▼
- ┌─────────────┐
- │ Backend #1  │
- ├─────────────┤
- │ Backend #2  │
- ├─────────────┤
- │ Backend #3  │
- └─────────────┘
-```
+Required Osmocom libraries:
+
+| Library         | Purpose        |
+| --------------- | -------------- |
+| libosmocore     | core utilities |
+| libosmo-sccp    | SCCP stack     |
+| libosmo-sigtran | M3UA / SIGTRAN |
+
+Optional:
+
+| Component | Purpose             |
+| --------- | ------------------- |
+| osmo-stp  | SS7 STP for testing |
 
 ---
 
-# Required Libraries
+# Build
 
-The router depends on the **Osmocom SIGTRAN stack**.
-
-Required projects:
-
-| Library             | Purpose                    |
-| ------------------- | -------------------------- |
-| libosmocore         | Core utilities and logging |
-| libosmo-netif       | Networking helpers         |
-| libosmo-abis        | Osmocom support library    |
-| libosmo-sccp        | SCCP stack                 |
-| libosmo-sigtran     | M3UA / SUA                 |
-| libosmo-m3ua        | M3UA protocol              |
-| osmo-stp (optional) | SIGTRAN transfer point     |
-
----
-
-# Install Base Dependencies
-
-```
-sudo apt update
-
-sudo apt install -y \
-git \
-build-essential \
-autoconf \
-automake \
-libtool \
-pkg-config \
-libtalloc-dev \
-libgnutls28-dev \
-libpcap-dev \
-libmnl-dev \
-libsctp-dev \
-libdbus-1-dev \
-libsystemd-dev
-```
-
----
-
-# Directory Layout
-
-Recommended build workspace:
-
-```
-~/sigtran-build
-```
-
-Create directory:
-
-```
-mkdir -p ~/sigtran-build
-cd ~/sigtran-build
-```
-
----
-
-# Build Osmocom Libraries From Source
-
-Build order is **very important**.
-
----
-
-# 1. libosmocore
-
-Clone:
-
-```
-git clone https://gitea.osmocom.org/osmocom/libosmocore.git
-cd libosmocore
-```
-
-Build:
-
-```
-autoreconf -fi
-./configure
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-```
-
----
-
-# 2. libosmo-netif
-
-```
-cd ~/sigtran-build
-git clone https://gitea.osmocom.org/osmocom/libosmo-netif.git
-cd libosmo-netif
-```
-
-Build:
-
-```
-autoreconf -fi
-./configure
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-```
-
----
-
-# 3. libosmo-abis
-
-```
-cd ~/sigtran-build
-git clone https://gitea.osmocom.org/osmocom/libosmo-abis.git
-cd libosmo-abis
-```
-
-Build:
-
-```
-autoreconf -fi
-./configure
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-```
-
----
-
-# 4. libosmo-sccp
-
-```
-cd ~/sigtran-build
-git clone https://gitea.osmocom.org/osmocom/libosmo-sccp.git
-cd libosmo-sccp
-```
-
-Build:
-
-```
-autoreconf -fi
-./configure
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-```
-
----
-
-# 5. libosmo-sigtran
-
-```
-cd ~/sigtran-build
-git clone https://gitea.osmocom.org/osmocom/libosmo-sigtran.git
-cd libosmo-sigtran
-```
-
-Build:
-
-```
-autoreconf -fi
-./configure
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-```
-
----
-
-# Optional: osmo-stp
-
-If you want to run a **SIGTRAN STP for testing**:
-
-```
-cd ~/sigtran-build
-git clone https://gitea.osmocom.org/osmocom/osmo-stp.git
-cd osmo-stp
-```
-
-Build:
-
-```
-autoreconf -fi
-./configure
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-```
-
----
-
-# Verify Installation
-
-Check installed libraries:
-
-```
-ldconfig -p | grep osmo
-```
-
-Expected output should show:
-
-```
-libosmocore.so
-libosmo-sccp.so
-libosmo-sigtran.so
-```
-
----
-
-# Build TCAP Router
-
-Clone your repository:
+Clone repository:
 
 ```
 git clone https://github.com/tahseenjamal/tcap_router_ubuntu.git
@@ -558,15 +357,7 @@ cd tcap_router_ubuntu
 Compile:
 
 ```
-gcc -o tcap-router \
-main.c \
-sigtran/sigtran_stack.c \
-core/worker_pool.c \
-backend/backend_pool.c \
--losmocore \
--losmo-sccp \
--losmo-sigtran \
--lpthread
+make
 ```
 
 ---
@@ -577,69 +368,58 @@ backend/backend_pool.c \
 ./tcap-router
 ```
 
-Expected output:
+Expected startup output:
 
 ```
+Starting TCAP Router
 Initializing SS7 + SCCP stack
-TCAP Router started
-Workers initialized
+SCCP stack initialized
+Backend 0 connected
+Backend 1 connected
 ```
 
 ---
 
 # Testing
 
-You can simulate TCAP traffic using:
-
-* osmo-stp
-* ss7box
-* custom TCAP generators
-
-Packet capture:
+Capture traffic:
 
 ```
 sudo tcpdump -i any port 2905 -w sigtran.pcap
 ```
 
+Test sources:
+
+* osmo-stp
+* SS7 simulators
+* TCAP traffic generators
+
 ---
 
 # Current Features
 
-| Feature                   | Status      |
-| ------------------------- | ----------- |
-| TCAP OTID hashing         | Implemented |
-| Worker thread pool        | Implemented |
-| Backend connection pool   | Implemented |
-| SCCP stack initialization | Implemented |
-| TCAP transaction routing  | Implemented |
-| SIGTRAN M3UA handling     | Partial     |
-| Health checks             | Pending     |
-| Dynamic backend discovery | Pending     |
-| Metrics / Prometheus      | Pending     |
-| Carrier-grade failover    | Pending     |
+| Feature                  | Status      |
+| ------------------------ | ----------- |
+| Dialog-aware routing     | Implemented |
+| Worker thread pool       | Implemented |
+| Lock-free worker queues  | Implemented |
+| Transaction table        | Implemented |
+| Backend reconnect logic  | Implemented |
+| Atomic backend state     | Implemented |
+| SCCP validation          | Implemented |
+| Dialog garbage collector | Implemented |
+| Metrics counters         | Partial     |
 
 ---
 
-# Future Work
+# Future Improvements
 
-Planned improvements:
+Possible next steps:
 
-* TCAP dialogue tracking
-* backend failover
-* congestion control
+* Prometheus metrics
+* backend configuration file
+* dynamic backend discovery
 * SCTP multi-homing
-* statistics and monitoring
-* carrier-grade SIGTRAN routing
-
----
-
-# License
-
-MIT License
-
----
-
-# Author
-
-Tahseen Jamal
+* congestion control
+* SS7 statistics interface
 
