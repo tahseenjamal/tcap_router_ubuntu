@@ -1,3 +1,4 @@
+
 # TCAP Router (Dialog-Aware Load Balancer)
 
 ## Overview
@@ -290,75 +291,355 @@ With further tuning:
 
 ---
 
-# Build
+# TCAP Router
 
-Example compile command:
+A lightweight **TCAP routing / load-balancing framework** built on top of the **Osmocom SIGTRAN stack**.
+This project focuses on routing **TCAP transactions based on OTID hashing** to backend TCAP application servers.
+
+The goal is to eventually evolve this into a **carrier-grade TCAP router for SIGTRAN networks**.
+
+---
+
+# Environment
+
+Tested on:
+
+| Component    | Version          |
+| ------------ | ---------------- |
+| OS           | Ubuntu 24.04 LTS |
+| GCC          | 13.x             |
+| Kernel       | 6.x              |
+| Architecture | x86_64           |
+
+---
+
+# High Level Architecture
 
 ```
-gcc main.c \
-core/backend_pool.c \
-core/worker_pool.c \
-core/transaction_table.c \
-router/router.c \
-sigtran/sigtran_stack.c \
--o tcap-router \
--O2 -Wall -pthread \
--losmocore -losmo-sigtran -lsctp
+Telco Network
+      │
+      │ M3UA / SCCP / TCAP
+      ▼
+┌─────────────────────┐
+│ TCAP Router         │
+│                     │
+│  OTID Hash          │
+│  Worker Pool        │
+│  Message Dispatch   │
+└─────────┬───────────┘
+          │
+          │ TCP
+          ▼
+ ┌─────────────┐
+ │ Backend #1  │
+ ├─────────────┤
+ │ Backend #2  │
+ ├─────────────┤
+ │ Backend #3  │
+ └─────────────┘
 ```
 
 ---
 
-# Running
+# Required Libraries
+
+The router depends on the **Osmocom SIGTRAN stack**.
+
+Required projects:
+
+| Library             | Purpose                    |
+| ------------------- | -------------------------- |
+| libosmocore         | Core utilities and logging |
+| libosmo-netif       | Networking helpers         |
+| libosmo-abis        | Osmocom support library    |
+| libosmo-sccp        | SCCP stack                 |
+| libosmo-sigtran     | M3UA / SUA                 |
+| libosmo-m3ua        | M3UA protocol              |
+| osmo-stp (optional) | SIGTRAN transfer point     |
+
+---
+
+# Install Base Dependencies
+
+```
+sudo apt update
+
+sudo apt install -y \
+git \
+build-essential \
+autoconf \
+automake \
+libtool \
+pkg-config \
+libtalloc-dev \
+libgnutls28-dev \
+libpcap-dev \
+libmnl-dev \
+libsctp-dev \
+libdbus-1-dev \
+libsystemd-dev
+```
+
+---
+
+# Directory Layout
+
+Recommended build workspace:
+
+```
+~/sigtran-build
+```
+
+Create directory:
+
+```
+mkdir -p ~/sigtran-build
+cd ~/sigtran-build
+```
+
+---
+
+# Build Osmocom Libraries From Source
+
+Build order is **very important**.
+
+---
+
+# 1. libosmocore
+
+Clone:
+
+```
+git clone https://gitea.osmocom.org/osmocom/libosmocore.git
+cd libosmocore
+```
+
+Build:
+
+```
+autoreconf -fi
+./configure
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+---
+
+# 2. libosmo-netif
+
+```
+cd ~/sigtran-build
+git clone https://gitea.osmocom.org/osmocom/libosmo-netif.git
+cd libosmo-netif
+```
+
+Build:
+
+```
+autoreconf -fi
+./configure
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+---
+
+# 3. libosmo-abis
+
+```
+cd ~/sigtran-build
+git clone https://gitea.osmocom.org/osmocom/libosmo-abis.git
+cd libosmo-abis
+```
+
+Build:
+
+```
+autoreconf -fi
+./configure
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+---
+
+# 4. libosmo-sccp
+
+```
+cd ~/sigtran-build
+git clone https://gitea.osmocom.org/osmocom/libosmo-sccp.git
+cd libosmo-sccp
+```
+
+Build:
+
+```
+autoreconf -fi
+./configure
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+---
+
+# 5. libosmo-sigtran
+
+```
+cd ~/sigtran-build
+git clone https://gitea.osmocom.org/osmocom/libosmo-sigtran.git
+cd libosmo-sigtran
+```
+
+Build:
+
+```
+autoreconf -fi
+./configure
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+---
+
+# Optional: osmo-stp
+
+If you want to run a **SIGTRAN STP for testing**:
+
+```
+cd ~/sigtran-build
+git clone https://gitea.osmocom.org/osmocom/osmo-stp.git
+cd osmo-stp
+```
+
+Build:
+
+```
+autoreconf -fi
+./configure
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+---
+
+# Verify Installation
+
+Check installed libraries:
+
+```
+ldconfig -p | grep osmo
+```
+
+Expected output should show:
+
+```
+libosmocore.so
+libosmo-sccp.so
+libosmo-sigtran.so
+```
+
+---
+
+# Build TCAP Router
+
+Clone your repository:
+
+```
+git clone https://github.com/tahseenjamal/tcap_router_ubuntu.git
+cd tcap_router_ubuntu
+```
+
+Compile:
+
+```
+gcc -o tcap-router \
+main.c \
+sigtran/sigtran_stack.c \
+core/worker_pool.c \
+backend/backend_pool.c \
+-losmocore \
+-losmo-sccp \
+-losmo-sigtran \
+-lpthread
+```
+
+---
+
+# Run
 
 ```
 ./tcap-router
 ```
 
-Startup output:
+Expected output:
 
 ```
-Starting TCAP Router
-Initializing SCCP stack
-SCCP stack initialized
-```
-
----
-
-# Example Deployment
-
-Typical telecom deployment:
-
-```
-Telco STP
-   │
-   ▼
-osmo-stp
-   │
-   ▼
-TCAP Router
-   │
-   ▼
-Application cluster
+Initializing SS7 + SCCP stack
+TCAP Router started
+Workers initialized
 ```
 
 ---
 
-# Future Improvements
+# Testing
 
-Possible enhancements:
+You can simulate TCAP traffic using:
 
-* M3UA protocol parsing
-* backend health monitoring
-* dynamic backend discovery
+* osmo-stp
+* ss7box
+* custom TCAP generators
+
+Packet capture:
+
+```
+sudo tcpdump -i any port 2905 -w sigtran.pcap
+```
+
+---
+
+# Current Features
+
+| Feature                   | Status      |
+| ------------------------- | ----------- |
+| TCAP OTID hashing         | Implemented |
+| Worker thread pool        | Implemented |
+| Backend connection pool   | Implemented |
+| SCCP stack initialization | Implemented |
+| TCAP transaction routing  | Implemented |
+| SIGTRAN M3UA handling     | Partial     |
+| Health checks             | Pending     |
+| Dynamic backend discovery | Pending     |
+| Metrics / Prometheus      | Pending     |
+| Carrier-grade failover    | Pending     |
+
+---
+
+# Future Work
+
+Planned improvements:
+
+* TCAP dialogue tracking
+* backend failover
+* congestion control
 * SCTP multi-homing
-* zero-copy packet pools
-* metrics / observability
-* Prometheus integration
+* statistics and monitoring
+* carrier-grade SIGTRAN routing
 
 ---
 
 # License
 
-Open source implementation for telecom experimentation and high-performance TCAP routing.
+MIT License
 
 ---
+
+# Author
+
+Tahseen Jamal
+
