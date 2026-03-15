@@ -39,20 +39,23 @@ static uint32_t extract_otid(uint8_t* d, int len) {
     return 0;
 }
 
-static void process_packet(int fd) {
-    uint8_t buffer[BUFFER_SIZE];
+static void process_packet(int fd)
+{
+    struct msgb *msg = msgb_alloc(BUFFER_SIZE, "sccp");
 
-    int n = recv(fd, buffer, sizeof(buffer), 0);
+    if (!msg)
+        return;
 
-    if (n <= 0) return;
+    int n = recv(fd, msg->data, BUFFER_SIZE, 0);
 
-    struct msgb* msg = msgb_alloc(n, "sccp");
+    if (n <= 0) {
+        msgb_free(msg);
+        return;
+    }
 
-    if (!msg) return;
+    msgb_put(msg, n);
 
-    memcpy(msgb_put(msg, n), buffer, n);
-
-    uint32_t otid = extract_otid(buffer, n);
+    uint32_t otid = extract_otid(msg->data, n);
 
     worker_enqueue(msg, otid, 0, 0);
 }
