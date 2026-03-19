@@ -2,12 +2,15 @@
 #include <stdio.h>
 
 #include "core/backend_server.h"  // NEW
+#include "core/msg_pool.h"
 #include "core/transaction_table.h"
 #include "core/worker_pool.h"
 #include "sigtran/sigtran_stack.h"
 
 int main() {
     printf("Starting TCAP Router\n");
+
+    msg_pool_init();  // ✅ REQUIRED
 
     tx_table_init();
     tx_gc_start();
@@ -16,7 +19,6 @@ int main() {
 
     sigtran_start();
 
-    /* NEW: backend server */
     backend_server_start(2906);
 
     while (1) osmo_select_main(0);

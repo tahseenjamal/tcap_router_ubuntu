@@ -2,6 +2,7 @@
 #include <netinet/sctp.h>
 #include <osmocom/core/msgb.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -9,10 +10,11 @@
 
 #include "../router/router.h"
 #include "../router/tcap_parser.h"
+#include "msg_pool.h"
 
 #define MAX_EVENTS 1024
 #define MAX_BACKENDS 1024
-#define DIR_FROM_STP 0
+
 #define DIR_FROM_BACKEND 1
 
 int backend_fds[MAX_BACKENDS];
@@ -25,12 +27,15 @@ static void add_backend(int fd) {
     int idx = atomic_fetch_add(&backend_count, 1);
 
     if (idx >= MAX_BACKENDS) {
+        printf("Too many backends, rejecting fd=%d\n", fd);
         close(fd);
         atomic_fetch_sub(&backend_count, 1);
         return;
     }
 
     backend_fds[idx] = fd;
+
+    printf("Backend added fd=%d total=%d\n", fd, atomic_load(&backend_count));
 }
 
 /* ========================================= */
@@ -42,6 +47,7 @@ static void remove_backend(int fd) {
         if (backend_fds[i] == fd) {
             backend_fds[i] = backend_fds[n - 1];
             atomic_fetch_sub(&backend_count, 1);
+            printf("Backend removed fd=%d\n", fd);
             return;
         }
     }
@@ -51,22 +57,39 @@ static void remove_backend(int fd) {
 
 void backend_server_start(int port) {
     int listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP);
+    if (listen_sock < 0) {
+        perror("socket");
+        return;
+    }
 
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr));
-    listen(listen_sock, 128);
+    if (bind(listen_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        return;
+    }
+
+    if (listen(listen_sock, 128) < 0) {
+        perror("listen");
+        return;
+    }
 
     int ep = epoll_create1(0);
+    if (ep < 0) {
+        perror("epoll_create");
+        return;
+    }
 
     struct epoll_event ev = {0};
     ev.events = EPOLLIN;
     ev.data.fd = listen_sock;
 
     epoll_ctl(ep, EPOLL_CTL_ADD, listen_sock, &ev);
+
+    printf("Backend server listening on %d\n", port);
 
     while (1) {
         struct epoll_event events[MAX_EVENTS];
@@ -75,6 +98,8 @@ void backend_server_start(int port) {
         for (int i = 0; i < n; i++) {
             if (events[i].data.fd == listen_sock) {
                 int client = accept(listen_sock, NULL, NULL);
+                if (client < 0) continue;
+
                 add_backend(client);
 
                 ev.events = EPOLLIN;
@@ -96,7 +121,9 @@ void backend_server_start(int port) {
                 continue;
             }
 
-            struct msgb *msg = msgb_alloc(r, "backend");
+            /* ✅ USE POOL */
+            struct msgb *msg = msg_pool_get();
+            if (!msg) continue;
 
             memcpy(msg->data, buf, r);
             msg->len = r;

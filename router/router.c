@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "../core/msg_pool.h"
 #include "../core/transaction_table.h"
 #include "sccp_gt.h"
 
@@ -107,7 +108,7 @@ static uint8_t *extract_sccp_userdata(struct msgb *msg, int *len) {
  * ============================================ */
 static void send_to_stp(struct msgb *msg) {
     if (!sccp_user) {
-        msgb_free(msg);
+        msg_pool_put(msg);
         return;
     }
 
@@ -130,7 +131,7 @@ static void send_to_backend_fd(int fd, struct msgb *msg) {
         close(fd);
     }
 
-    msgb_free(msg);
+    msg_pool_put(msg);
 }
 
 /* ============================================
@@ -142,7 +143,7 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
     uint8_t *tcap = extract_sccp_userdata(msg, &tcap_len);
 
     if (!tcap) {
-        msgb_free(msg);
+        msg_pool_put(msg);
         return;
     }
 
@@ -160,7 +161,7 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
 
             if (backend_fd < 0) {
                 printf("No backend available\n");
-                msgb_free(msg);
+                msg_pool_put(msg);
                 return;
             }
 
@@ -180,14 +181,14 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
 
         } else {
             if (!dtid) {
-                msgb_free(msg);
+                msg_pool_put(msg);
                 return;
             }
 
             tx_info_t info;
 
             if (tx_lookup_full(dtid, &info) < 0) {
-                msgb_free(msg);
+                msg_pool_put(msg);
                 return;
             }
 
@@ -214,7 +215,7 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
     int backend_fd = get_backend_fd(msg);
 
     if (backend_fd < 0) {
-        msgb_free(msg);
+        msg_pool_put(msg);
         return;
     }
 
@@ -232,14 +233,14 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
 
     } else {
         if (!dtid) {
-            msgb_free(msg);
+            msg_pool_put(msg);
             return;
         }
 
         tx_info_t info;
 
         if (tx_lookup_full(dtid, &info) < 0) {
-            msgb_free(msg);
+            msg_pool_put(msg);
             return;
         }
 

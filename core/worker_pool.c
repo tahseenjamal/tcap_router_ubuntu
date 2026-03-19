@@ -6,6 +6,7 @@
 
 #include "../config.h"
 #include "../router/router.h"
+#include "msg_pool.h"
 
 typedef struct {
     struct msgb *msg;
@@ -45,7 +46,16 @@ void worker_enqueue(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
     pthread_mutex_lock(&lock[w]);
 
     unsigned int t = atomic_load(&tail[w]);
+    unsigned int h = atomic_load(&head[w]);
     unsigned int next = (t + 1) % QUEUE_SIZE;
+
+    /* ✅ OVERFLOW PROTECTION */
+    if (next == h) {
+        printf("Queue full → dropping message\n");
+        msg_pool_put(msg);
+        pthread_mutex_unlock(&lock[w]);
+        return;
+    }
 
     queue[w][t].msg = msg;
     queue[w][t].otid = otid;
