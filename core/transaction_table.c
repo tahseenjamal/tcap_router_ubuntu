@@ -1,5 +1,6 @@
 #include "transaction_table.h"
 
+#include <string.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <time.h>
@@ -12,6 +13,9 @@ typedef struct tx_entry {
     uint32_t id;
     int backend;
     time_t ts;
+
+    uint8_t gt[32];
+    int gt_len;
 
     struct tx_entry* next;
 
@@ -173,3 +177,59 @@ void tx_gc_start()
 
     pthread_detach(t);
 }
+
+void tx_store_full(uint32_t otid, int backend, uint8_t* gt, int gt_len)
+{
+    int h = hash(otid);
+
+    pthread_mutex_lock(&locks[h]);
+
+    tx_entry_t* e = malloc(sizeof(tx_entry_t));
+
+    if (!e) {
+        pthread_mutex_unlock(&locks[h]);
+        return;
+    }
+
+    e->id = otid;
+    e->backend = backend;
+    e->ts = time(NULL);
+
+    e->gt_len = gt_len;
+    if (gt && gt_len > 0)
+        memcpy(e->gt, gt, gt_len);
+
+    e->next = table[h];
+    table[h] = e;
+
+    pthread_mutex_unlock(&locks[h]);
+}
+
+int tx_lookup_full(uint32_t dtid, tx_info_t* out)
+{
+    int h = hash(dtid);
+
+    pthread_mutex_lock(&locks[h]);
+
+    tx_entry_t* e = table[h];
+
+    while (e) {
+        if (e->id == dtid) {
+
+            out->backend = e->backend;
+            out->gt_len = e->gt_len;
+
+            memcpy(out->gt, e->gt, e->gt_len);
+
+            pthread_mutex_unlock(&locks[h]);
+            return 0;
+        }
+        e = e->next;
+    }
+
+    pthread_mutex_unlock(&locks[h]);
+    return -1;
+}
+
+
+

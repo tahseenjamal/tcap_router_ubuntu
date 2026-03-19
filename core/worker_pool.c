@@ -70,7 +70,8 @@ void worker_enqueue_worker(int w, struct msgb *msg, uint32_t otid,
 /* auto worker selection */
 
 void worker_enqueue(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
-  int w = (otid ^ dtid) % MAX_WORKERS;
+  uint32_t key = otid ? otid : dtid;
+  int w = key % MAX_WORKERS;
 
   worker_enqueue_worker(w, msg, otid, dtid, type);
 }

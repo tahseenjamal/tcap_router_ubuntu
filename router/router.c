@@ -1,4 +1,5 @@
 #include "router.h"
+#include "sccp_gt.h"
 
 #include <osmocom/core/msgb.h>
 #include <stdatomic.h>
@@ -11,6 +12,9 @@
 /*
  * Extract SCCP user data (TCAP payload)
  */
+
+static uint8_t SELF_GT[] = {0x91, 0x88, 0x77, 0x66};
+static int SELF_GT_LEN = 4;
 
 static uint8_t *extract_sccp_userdata(struct msgb *msg, int *len) {
   uint8_t *d = msg->data;
@@ -58,45 +62,69 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
     return;
   }
 
-  /*
-   * Dialog routing
-   *
-   * BEGIN      -> choose backend
-   * CONTINUE   -> lookup DTID
-   * END        -> lookup DTID then remove
-   */
+  /* BEGIN detection */
+  int is_begin = (type == 1 && otid != 0);
 
-  if (type == 1) {
+  if (is_begin) {
 
-    /* BEGIN */
+    /* New dialog */
 
     b = backend_choose();
 
-    if (b && otid)
-      tx_store(otid, b->id);
+    if (!b || !otid) {
+      msgb_free(msg);
+      return;
+    }
+
+    uint8_t orig_gt[32];
+    int gt_len = 0;
+
+    if (extract_calling_gt(msg->data, msg->len, orig_gt, &gt_len) < 0) {
+      gt_len = 0;
+    }
+
+    /* rewrite GT */
+    if (info.gt_len > 0) {
+      rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
+    }
+
+    /* store full mapping */
+    tx_store_full(otid, b->id, orig_gt, gt_len);
 
   } else {
 
-    /* CONTINUE / END */
+    /* Existing dialog */
 
-    int backend = tx_lookup(dtid);
+    if (!dtid) {
+      msgb_free(msg);
+      return;
+    }
 
-    b = backend_get(backend);
+    tx_info_t info;
 
-    /* END -> remove dialog */
+    if (tx_lookup_full(dtid, &info) < 0) {
+      msgb_free(msg);
+      return;
+    }
 
-    if (type == 3 && dtid)
+    b = backend_get(info.backend);
+
+    if (!b) {
+      msgb_free(msg);
+      return;
+    }
+
+    /* restore GT */
+    rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
+
+    /* END cleanup — DTID is correct key */
+
+    if (type == 3 && dtid) {
       tx_delete(dtid);
+    }
   }
 
-  if (!b) {
-    msgb_free(msg);
-    return;
-  }
-
-  /*
-   * Forward message
-   */
+  /* Send to backend */
 
   atomic_fetch_add(&b->load, 1);
 
