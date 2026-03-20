@@ -1,17 +1,14 @@
-# TCAP Router (Dialog-Aware Load Balancer with M3UA Backend)
+# TCAP Router (Dialog-Aware Load Balancer)
 
 ## 🚀 Overview
 
 This project implements a **high-performance TCAP dialog-aware load balancer in C**.
 
-It is designed to run **behind Osmocom STP (`osmo-stp`)** and in front of **M3UA-based backend applications (via an adaptor layer)**.
+It is designed to run:
 
-The router provides:
-
-* TCAP dialog stickiness
-* Backend load balancing
-* SCCP Calling Party GT rewriting
-* High-throughput concurrent processing
+* **Behind Osmocom STP (`osmo-stp`)**
+* **In front of an M3UA adaptor layer**
+* Which connects to backend applications
 
 ---
 
@@ -20,26 +17,52 @@ The router provides:
 ```
         SS7 Network
              │
-        (SIGTRAN / M3UA)
+      (MTP3 / SIGTRAN)
              │
         ┌─────────────┐
         │  osmo-stp   │
         └─────────────┘
              │
-         SCCP/TCAP
+          SCCP
+             │
+          TCAP
              │
     ┌───────────────────┐
     │   TCAP Router     │
     │ (this project)    │
     └───────────────────┘
              │
-        M3UA Adaptor
+        SCCP / TCAP
+             │
+      ┌────────────────┐
+      │  M3UA Adaptor  │
+      └────────────────┘
+             │
+          M3UA/SCTP
              │
     ┌───────────────────┐
     │ Backend Apps      │
     │ (M3UA Clients)    │
     └───────────────────┘
 ```
+
+---
+
+## ⚠️ Protocol Separation (Important)
+
+* **TCAP Router handles:**
+
+  * SCCP
+  * TCAP
+
+* **M3UA Adaptor handles:**
+
+  * M3UA
+  * SCTP
+  * ASP/AS state
+
+> TCAP itself does NOT speak M3UA.
+> The adaptor performs protocol translation between SCCP/TCAP and M3UA.
 
 ---
 
@@ -58,10 +81,10 @@ The router provides:
 
 ### M3UA Adaptor
 
-* Converts SCCP/TCAP ↔ M3UA
-* Handles SCTP associations
-* Manages ASP/AS state
-* Provides clean interface to backend apps
+* Encapsulates SCCP into M3UA
+* Manages SCTP associations
+* Handles ASP/AS state machine
+* Interfaces with backend applications
 
 ---
 
@@ -69,22 +92,22 @@ The router provides:
 
 * Speak **M3UA protocol**
 * Handle business logic (MAP, USSD, SMS, etc.)
-* Stateless per message (router ensures session consistency)
+* Remain stateless (router ensures dialog affinity)
 
 ---
 
 ## ⚙️ Core Features
 
-| Feature           | Description                             |
-| ----------------- | --------------------------------------- |
-| Dialog Stickiness | Same TCAP dialog routed to same backend |
-| Load Balancing    | Round-robin for new dialogs             |
-| GT Rewrite        | Replace calling GT with router identity |
-| GT Restore        | Restore original GT on response         |
-| Worker Pool       | Parallel processing with dialog hashing |
-| Lock Striping     | High-performance transaction table      |
-| Message Pool      | Reduced memory allocations              |
-| Epoll-based IO    | Efficient backend handling              |
+| Feature           | Description                                    |
+| ----------------- | ---------------------------------------------- |
+| Dialog Stickiness | Same TCAP dialog always routed to same backend |
+| Load Balancing    | Round-robin for new dialogs                    |
+| GT Rewrite        | Replace calling GT with router identity        |
+| GT Restore        | Restore original GT on response                |
+| Worker Pool       | Parallel processing using dialog hashing       |
+| Lock Striping     | Efficient transaction table                    |
+| Message Pool      | Reduced allocations                            |
+| Epoll-based IO    | Efficient backend handling                     |
 
 ---
 
@@ -94,32 +117,34 @@ The router provides:
 
 * SCCP message received
 * TCAP parsed
-* If BEGIN:
 
-  * Select backend
-  * Store OTID → backend mapping
-  * Rewrite Calling GT → SELF_GT
-* If CONTINUE/END:
+**BEGIN:**
 
-  * Lookup backend via DTID
-  * Restore original GT
+* Select backend
+* Store OTID → backend mapping
+* Rewrite Calling GT
+
+**CONTINUE / END:**
+
+* Lookup backend using DTID
+* Restore original GT
 
 ---
 
-### 2. Router → Backend (via M3UA Adaptor)
+### 2. Router → M3UA Adaptor
 
 * SCCP/TCAP forwarded
 * Adaptor converts to M3UA
-* Backend processes request
+* Sent over SCTP
 
 ---
 
 ### 3. Backend → Router
 
-* Response received via adaptor
-* TCAP parsed
+* M3UA → SCCP conversion by adaptor
+* Router receives SCCP/TCAP
 * Lookup dialog mapping
-* Restore original GT
+* Restore GT
 * Forward to STP
 
 ---
@@ -127,7 +152,7 @@ The router provides:
 ## 🧵 Concurrency Model
 
 * Fixed worker pool (`MAX_WORKERS`)
-* Dialog-based hashing:
+* Dialog hashing:
 
 ```
 worker = (OTID or DTID) % MAX_WORKERS
@@ -136,8 +161,8 @@ worker = (OTID or DTID) % MAX_WORKERS
 ### Guarantees
 
 * In-order processing per dialog
-* No cross-thread contention
-* High throughput under load
+* No cross-thread locking
+* High throughput
 
 ---
 
@@ -147,13 +172,13 @@ worker = (OTID or DTID) % MAX_WORKERS
 | -------------------------- | --------------------------- |
 | `main.c`                   | Entry point                 |
 | `sigtran/sigtran_stack.c`  | SCCP stack integration      |
-| `router/router.c`          | Core routing logic          |
+| `router/router.c`          | Routing logic               |
 | `router/tcap_parser.c`     | TCAP parsing                |
-| `router/sccp_gt.c`         | GT extraction/rewrite       |
+| `router/sccp_gt.c`         | GT handling                 |
 | `core/backend_server.c`    | Backend connection handling |
-| `core/worker_pool.c`       | Worker pool                 |
+| `core/worker_pool.c`       | Worker threads              |
 | `core/transaction_table.c` | Dialog mapping              |
-| `core/msg_pool.c`          | Message memory pool         |
+| `core/msg_pool.c`          | Memory pool                 |
 
 ---
 
@@ -186,7 +211,7 @@ make clean
 ./tcap-router
 ```
 
-Backend connections are accepted on:
+Backend connections on:
 
 ```
 Port: 2906
@@ -196,54 +221,40 @@ Port: 2906
 
 ## ⚠️ Assumptions
 
-* SCCP messages are primarily UDT/XUDT
-* M3UA adaptor handles full SIGTRAN responsibilities
+* SCCP messages are UDT/XUDT (basic support)
+* M3UA adaptor handles full SIGTRAN stack
 * Backend apps are stable M3UA clients
 
 ---
 
-## 🚧 Limitations (Current Version)
+## 🚧 Limitations
 
-* Partial SCCP support (no full segmentation handling)
-* Limited TCAP parsing (basic tags only)
+* No full SCCP segmentation support
+* Limited TCAP parsing (basic tags)
 * No backend health checks
 * No congestion control
-* No observability (metrics/logging limited)
+* Limited observability
 
 ---
 
 ## 🧭 Future Enhancements
 
-* Prometheus metrics (TPS, latency, queue depth)
+* Metrics (Prometheus)
 * Backend health-aware routing
 * Weighted load balancing
-* Full SCCP (XUDT, segmentation)
+* Full SCCP support (XUDT, segmentation)
 * Full TCAP ASN.1 parsing
-* High availability (active-active routers)
+* HA deployment (active-active)
 
 ---
 
 ## 💡 Use Cases
 
 * USSD platforms
-* MAP / HLR / HSS services
+* MAP/HLR/HSS routing
 * SMSC routing
 * SS7 service scaling
-* SS7 ↔ Diameter interworking
-
----
-
-## 🧪 Testing
-
-Recommended validation:
-
-* Simulate TCAP load
-* Verify:
-
-  * Dialog stickiness
-  * GT rewrite correctness
-  * Backend routing consistency
-  * Failure handling
+* Telecom middleware
 
 ---
 
@@ -251,12 +262,12 @@ Recommended validation:
 
 This project provides:
 
-> A high-performance TCAP routing layer between SS7 (via STP) and M3UA-based backend systems.
+> A high-performance TCAP routing layer between SS7 signaling (via STP) and M3UA-based backend systems.
 
 It cleanly separates:
 
-* SS7 signaling layer (handled by STP + adaptor)
-* Application logic (handled by backend systems)
+* **Signaling transport (M3UA/SCTP)** → handled by adaptor
+* **Application routing (TCAP)** → handled by this router
 
 ---
 
