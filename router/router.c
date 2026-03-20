@@ -25,7 +25,7 @@ extern int backend_fds[];
 extern atomic_int backend_count;
 extern atomic_int rr;
 
-/* ✅ NEW: needed for cleanup */
+/* needed for cleanup */
 extern void remove_backend(int fd);
 
 /* ============================================
@@ -38,209 +38,219 @@ static int SELF_GT_LEN = 4;
  * Safe send
  * ============================================ */
 static int send_full(int fd, uint8_t *buf, int len) {
-    int sent = 0;
+  int sent = 0;
 
-    while (sent < len) {
-        int s = send(fd, buf + sent, len - sent, MSG_NOSIGNAL);
+  while (sent < len) {
+    int s = send(fd, buf + sent, len - sent, MSG_NOSIGNAL);
 
-        if (s <= 0) return -1;
+    if (s <= 0)
+      return -1;
 
-        sent += s;
-    }
+    sent += s;
+  }
 
-    return 0;
+  return 0;
 }
 
 /* ============================================
  * Backend selection
  * ============================================ */
 static int choose_backend_fd() {
-    int n = atomic_load(&backend_count);
+  int n = atomic_load(&backend_count);
 
-    if (n <= 0) return -1;
-
-    int start = atomic_fetch_add(&rr, 1);
-
-    for (int k = 0; k < n; k++) {
-        int fd = backend_fds[(start + k) % n];
-        if (fd > 0) return fd;
-    }
-
+  if (n <= 0)
     return -1;
+
+  int start = atomic_fetch_add(&rr, 1);
+
+  for (int k = 0; k < n; k++) {
+    int fd = backend_fds[(start + k) % n];
+    if (fd > 0)
+      return fd;
+  }
+
+  return -1;
 }
 
 /* ============================================
  * Extract backend fd
  * ============================================ */
 static inline int get_backend_fd(struct msgb *msg) {
-    int fd = -1;
-    memcpy(&fd, &msg->cb[1], sizeof(int));
-    return fd;
+  int fd = -1;
+  memcpy(&fd, &msg->cb[1], sizeof(int));
+  return fd;
 }
 
 /* ============================================
  * Extract SCCP payload
  * ============================================ */
 static uint8_t *extract_sccp_userdata(struct msgb *msg, int *len) {
-    uint8_t *d = msg->data;
+  uint8_t *d = msg->data;
 
-    if (msg->len < 5) return NULL;
+  if (msg->len < 5)
+    return NULL;
 
-    uint8_t msg_type = d[0];
+  uint8_t msg_type = d[0];
 
-    if (msg_type != 0x09 && msg_type != 0x11 && msg_type != 0x13) return NULL;
+  if (msg_type != 0x09 && msg_type != 0x11 && msg_type != 0x13)
+    return NULL;
 
-    uint8_t ptr_data = d[3];
+  uint8_t ptr_data = d[3];
 
-    if (ptr_data == 0 || ptr_data >= msg->len) return NULL;
+  if (ptr_data == 0 || ptr_data >= msg->len)
+    return NULL;
 
-    int offset = ptr_data + 1;
+  int offset = ptr_data + 1;
 
-    if (offset >= msg->len) return NULL;
+  if (offset >= msg->len)
+    return NULL;
 
-    *len = msg->len - offset;
-    return &d[offset];
+  *len = msg->len - offset;
+  return &d[offset];
 }
 
 /* ============================================
  * Send to STP
  * ============================================ */
 static void send_to_stp(struct msgb *msg) {
-    if (!sccp_user) {
-        msg_pool_put(msg);
-        return;
-    }
+  if (!sccp_user) {
+    printf("DROP: sccp_user not ready\n");
+    msg_pool_put(msg);
+    return;
+  }
 
-    struct osmo_prim_hdr oph;
-    memset(&oph, 0, sizeof(oph));
+  struct osmo_prim_hdr oph;
+  memset(&oph, 0, sizeof(oph));
 
-    oph.primitive = OSMO_SCU_PRIM_N_DATA;
-    oph.operation = PRIM_OP_REQUEST;
-    oph.msg = msg;
+  oph.primitive = OSMO_SCU_PRIM_N_DATA;
+  oph.operation = PRIM_OP_REQUEST;
+  oph.msg = msg;
 
-    osmo_sccp_user_sap_down(sccp_user, &oph);
+  osmo_sccp_user_sap_down(sccp_user, &oph);
 }
 
 /* ============================================
  * Send to backend
  * ============================================ */
 static void send_to_backend_fd(int fd, struct msgb *msg) {
-    if (send_full(fd, msg->data, msg->len) < 0) {
-        printf("Backend send failed fd=%d\n", fd);
+  if (send_full(fd, msg->data, msg->len) < 0) {
+    printf("Backend send failed fd=%d\n", fd);
 
-        remove_backend(fd);  // ✅ FIX
-        close(fd);
-    }
+    remove_backend(fd);
+    close(fd);
+  }
 
-    msg_pool_put(msg);
+  msg_pool_put(msg);
 }
 
 /* ============================================
  * MAIN ROUTER
  * ============================================ */
 void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
-    int tcap_len = 0;
+  int tcap_len = 0;
 
-    uint8_t *tcap = extract_sccp_userdata(msg, &tcap_len);
+  uint8_t *tcap = extract_sccp_userdata(msg, &tcap_len);
 
-    if (!tcap) {
-        msg_pool_put(msg);
-        return;
-    }
+  if (!tcap) {
+    printf("DROP: invalid SCCP payload\n");
+    msg_pool_put(msg);
+    return;
+  }
 
-    int direction = msg->cb[0];
-    int is_begin = (type == 1 && otid != 0);
+  int direction = msg->cb[0];
+  int is_begin = (type == 1 && otid != 0);
 
-    /* ============================================
-     * STP → BACKEND
-     * ============================================ */
-    if (direction == DIR_FROM_STP) {
-        int backend_fd = -1;
-
-        if (is_begin) {
-            backend_fd = choose_backend_fd();
-
-            if (backend_fd < 0) {
-                printf("No backend available\n");
-                msg_pool_put(msg);
-                return;
-            }
-
-            uint8_t orig_gt[32];
-            int gt_len = 0;
-
-            if (extract_calling_gt(msg->data, msg->len, orig_gt, &gt_len) < 0)
-                gt_len = 0;
-
-            rewrite_calling_gt(msg->data, msg->len, SELF_GT, SELF_GT_LEN);
-
-            tx_store_full(otid, backend_fd, orig_gt, gt_len);
-
-        } else {
-            if (!dtid) {
-                msg_pool_put(msg);
-                return;
-            }
-
-            tx_info_t info;
-
-            if (tx_lookup_full(dtid, &info) < 0) {
-                msg_pool_put(msg);
-                return;
-            }
-
-            backend_fd = info.backend;
-
-            if (info.gt_len > 0)
-                rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
-
-            if (type == 3) tx_delete(dtid);
-        }
-
-        send_to_backend_fd(backend_fd, msg);
-        return;
-    }
-
-    /* ============================================
-     * BACKEND → STP
-     * ============================================ */
-
-    int backend_fd = get_backend_fd(msg);
-
-    if (backend_fd < 0) {
-        msg_pool_put(msg);
-        return;
-    }
+  /* ============================================
+   * STP → BACKEND
+   * ============================================ */
+  if (direction == DIR_FROM_STP) {
+    int backend_fd = -1;
 
     if (is_begin) {
-        uint8_t orig_gt[32];
-        int gt_len = 0;
+      backend_fd = choose_backend_fd();
 
-        if (extract_calling_gt(msg->data, msg->len, orig_gt, &gt_len) < 0)
-            gt_len = 0;
+      if (backend_fd < 0) {
+        printf("DROP: no backend available\n");
+        msg_pool_put(msg);
+        return;
+      }
 
-        rewrite_calling_gt(msg->data, msg->len, SELF_GT, SELF_GT_LEN);
+      uint8_t orig_gt[32];
+      int gt_len = 0;
 
-        tx_store_full(otid, backend_fd, orig_gt, gt_len);
+      if (extract_calling_gt(msg->data, msg->len, orig_gt, &gt_len) < 0)
+        gt_len = 0;
+
+      rewrite_calling_gt(msg->data, msg->len, SELF_GT, SELF_GT_LEN);
+
+      tx_store_full(otid, backend_fd, orig_gt, gt_len);
 
     } else {
-        if (!dtid) {
-            msg_pool_put(msg);
-            return;
-        }
+      if (!dtid) {
+        printf("DROP: missing dtid (STP→BACKEND)\n");
+        msg_pool_put(msg);
+        return;
+      }
 
-        tx_info_t info;
+      tx_info_t info;
 
-        if (tx_lookup_full(dtid, &info) < 0) {
-            msg_pool_put(msg);
-            return;
-        }
+      if (tx_lookup_full(dtid, &info) < 0) {
+        printf("DROP: tx_lookup failed dtid=%u\n", dtid);
+        msg_pool_put(msg);
+        return;
+      }
 
-        if (info.gt_len > 0)
-            rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
+      backend_fd = info.backend;
 
-        if (type == 3) tx_delete(dtid);
+      if (info.gt_len > 0)
+        rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
+
+      if (type == 3 || type == 2) // END or ABORT
+        tx_delete(dtid);
     }
 
-    send_to_stp(msg);
+    send_to_backend_fd(backend_fd, msg);
+    return;
+  }
+
+  /* ============================================
+   * BACKEND → STP
+   * ============================================ */
+
+  int backend_fd = get_backend_fd(msg);
+
+  if (backend_fd < 0) {
+    printf("DROP: invalid backend fd\n");
+    msg_pool_put(msg);
+    return;
+  }
+
+  /* 🚫 Backend should not initiate dialogs */
+  if (is_begin) {
+    printf("WARN: backend sent BEGIN, dropping\n");
+    msg_pool_put(msg);
+    return;
+  }
+
+  if (!dtid) {
+    printf("DROP: missing dtid (BACKEND→STP)\n");
+    msg_pool_put(msg);
+    return;
+  }
+
+  tx_info_t info;
+
+  if (tx_lookup_full(dtid, &info) < 0) {
+    printf("DROP: tx_lookup failed dtid=%u\n", dtid);
+    msg_pool_put(msg);
+    return;
+  }
+
+  if (info.gt_len > 0)
+    rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
+
+  if (type == 3 || type == 2) // END or ABORT
+    tx_delete(dtid);
+
+  send_to_stp(msg);
 }
