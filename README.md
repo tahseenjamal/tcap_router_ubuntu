@@ -1,548 +1,266 @@
-# TCAP Router (Dialog-Aware Load Balancer)
+# TCAP Router (Dialog-Aware Load Balancer with M3UA Backend)
 
-## Overview
+## 🚀 Overview
 
-This project implements a **high-performance TCAP dialog load balancer written in C**.
+This project implements a **high-performance TCAP dialog-aware load balancer in C**.
 
-It is designed to run **behind Osmocom STP (`osmo-stp`)**, which handles the full **SIGTRAN protocol stack**:
+It is designed to run **behind Osmocom STP (`osmo-stp`)** and in front of **M3UA-based backend applications (via an adaptor layer)**.
 
-* SCTP
-* M3UA
-* SCCP routing
-* SS7 network management
+The router provides:
 
-The router itself focuses **only on TCAP dialog routing**, enabling scalable backend clusters for telecom services such as:
-
-* USSD platforms
-* MAP / HLR / HSS services
-* SMS routing systems
-* CAMEL / IN services
-* SS7 ↔ Diameter gateways
-
-The router guarantees **dialog stickiness**, meaning all TCAP messages belonging to the same dialog are always routed to the same backend application.
+* TCAP dialog stickiness
+* Backend load balancing
+* SCCP Calling Party GT rewriting
+* High-throughput concurrent processing
 
 ---
 
-# Architecture
+## 🧠 Architecture
 
 ```
-SS7 Network
-      │
-      │ SCTP / M3UA
-      ▼
-+-------------+
-|  osmo-stp   |
-| (SIGTRAN)   |
-+-------------+
-      │
-      │ SCCP primitives
-      ▼
-+----------------------+
-|  TCAP Router         |
-|                      |
-|  - TCAP parsing      |
-|  - dialog hashing    |
-|  - worker dispatch   |
-|  - backend routing   |
-+----------------------+
-      │
-      │ SCTP
-      ▼
-+--------------+   +--------------+
-| Backend TCAP |   | Backend TCAP |
-| Application  |   | Application  |
-+--------------+   +--------------+
+        SS7 Network
+             │
+        (SIGTRAN / M3UA)
+             │
+        ┌─────────────┐
+        │  osmo-stp   │
+        └─────────────┘
+             │
+         SCCP/TCAP
+             │
+    ┌───────────────────┐
+    │   TCAP Router     │
+    │ (this project)    │
+    └───────────────────┘
+             │
+        M3UA Adaptor
+             │
+    ┌───────────────────┐
+    │ Backend Apps      │
+    │ (M3UA Clients)    │
+    └───────────────────┘
 ```
 
 ---
 
-# Key Design Principles
+## 🎯 Responsibilities
 
-## Separation of Responsibilities
+### TCAP Router
 
-| Component       | Responsibility                     |
-| --------------- | ---------------------------------- |
-| **osmo-stp**    | SIGTRAN stack (SCTP + M3UA + SCCP) |
-| **TCAP Router** | Dialog-aware TCAP load balancing   |
-| **Backends**    | Telecom application logic          |
-
-This keeps the router **lightweight, deterministic, and scalable**.
-
----
-
-# TCAP Dialog Routing
-
-TCAP dialogs contain the following message types:
-
-| Message  | Tag    |
-| -------- | ------ |
-| Begin    | `0x62` |
-| Continue | `0x65` |
-| End      | `0x64` |
-
-The router extracts:
-
-```
-OTID – Originating Transaction ID
-DTID – Destination Transaction ID
-```
-
-Routing algorithm:
-
-```
-BEGIN
-   → choose backend (round-robin)
-   → store OTID → backend mapping
-
-CONTINUE / END
-   → lookup DTID
-   → route to same backend
-```
-
-This guarantees **dialog affinity**.
+* Extract TCAP OTID / DTID
+* Maintain dialog → backend mapping
+* Perform load balancing for BEGIN dialogs
+* Ensure dialog stickiness for CONTINUE/END
+* Rewrite SCCP Calling Party GT
+* Restore original GT on return path
 
 ---
 
-# Worker Affinity
+### M3UA Adaptor
 
-Dialogs are distributed across worker threads using:
-
-```
-worker = (OTID ^ DTID) % MAX_WORKERS
-```
-
-Benefits:
-
-* CPU cache locality
-* lock-free worker queues
-* consistent dialog handling
-* minimal synchronization
+* Converts SCCP/TCAP ↔ M3UA
+* Handles SCTP associations
+* Manages ASP/AS state
+* Provides clean interface to backend apps
 
 ---
 
-# Project Structure
+### Backend Applications
 
-```
-tcap_router/
-│
-├── main.c
-├── config.h
-│
-├── sigtran/
-│   ├── sigtran_stack.c
-│   └── sigtran_stack.h
-│
-├── router/
-│   ├── router.c
-│   └── router.h
-│
-├── core/
-│   ├── worker_pool.c
-│   ├── worker_pool.h
-│   ├── backend_pool.c
-│   ├── backend_pool.h
-│   ├── transaction_table.c
-│   └── transaction_table.h
-```
+* Speak **M3UA protocol**
+* Handle business logic (MAP, USSD, SMS, etc.)
+* Stateless per message (router ensures session consistency)
 
 ---
 
-# Core Components
+## ⚙️ Core Features
 
-## SIGTRAN Integration
-
-File:
-
-```
-sigtran/sigtran_stack.c
-```
-
-Registers the router as an SCCP user inside the Osmocom stack:
-
-```
-osmo_sccp_user_bind(sccp, "tcap-router", sccp_prim_cb, 146);
-```
-
-Incoming flow:
-
-```
-SCCP primitive
-   ↓
-TCAP parser
-   ↓
-worker_enqueue()
-```
+| Feature           | Description                             |
+| ----------------- | --------------------------------------- |
+| Dialog Stickiness | Same TCAP dialog routed to same backend |
+| Load Balancing    | Round-robin for new dialogs             |
+| GT Rewrite        | Replace calling GT with router identity |
+| GT Restore        | Restore original GT on response         |
+| Worker Pool       | Parallel processing with dialog hashing |
+| Lock Striping     | High-performance transaction table      |
+| Message Pool      | Reduced memory allocations              |
+| Epoll-based IO    | Efficient backend handling              |
 
 ---
 
-# Worker Pool
+## 🔄 Message Flow
 
-File:
+### 1. STP → Router
 
-```
-core/worker_pool.c
-```
+* SCCP message received
+* TCAP parsed
+* If BEGIN:
 
-Features:
+  * Select backend
+  * Store OTID → backend mapping
+  * Rewrite Calling GT → SELF_GT
+* If CONTINUE/END:
 
-* lock-free ring buffers
-* one queue per worker
-* dialog-based worker affinity
-* atomic queue pointers
-* queue drop counter
-
-Queue overflow increments:
-
-```
-queue_drops
-```
-
-instead of silently losing packets.
+  * Lookup backend via DTID
+  * Restore original GT
 
 ---
 
-# Transaction Table
+### 2. Router → Backend (via M3UA Adaptor)
 
-File:
-
-```
-core/transaction_table.c
-```
-
-Maintains dialog stickiness:
-
-```
-OTID → backend
-```
-
-Features:
-
-* hash table with **262,144 buckets**
-* per-bucket locking
-* dialog garbage collector thread
-* configurable timeout (`TX_TIMEOUT`)
-
-Expired dialogs are automatically removed.
+* SCCP/TCAP forwarded
+* Adaptor converts to M3UA
+* Backend processes request
 
 ---
 
-# TCAP Routing
+### 3. Backend → Router
 
-File:
-
-```
-router/router.c
-```
-
-Processing pipeline:
-
-```
-SCCP message
-   ↓
-extract SCCP user data
-   ↓
-parse TCAP message
-   ↓
-determine dialog type
-   ↓
-route to backend
-```
-
-Supported SCCP message types:
-
-```
-UDT  (0x09)
-XUDT (0x11)
-LUDT (0x13)
-```
-
-Pointer validation prevents malformed SCCP packets from crashing the router.
+* Response received via adaptor
+* TCAP parsed
+* Lookup dialog mapping
+* Restore original GT
+* Forward to STP
 
 ---
 
-# Backend Pool
+## 🧵 Concurrency Model
 
-File:
-
-```
-core/backend_pool.c
-```
-
-Maintains persistent connections to backend TCAP servers.
-
-Features:
-
-* round-robin backend selection
-* atomic backend state
-* connection failure detection
-* automatic reconnect thread
-
-Example backend configuration:
+* Fixed worker pool (`MAX_WORKERS`)
+* Dialog-based hashing:
 
 ```
-127.0.0.1:4000
-127.0.0.1:4001
+worker = (OTID or DTID) % MAX_WORKERS
 ```
 
-Failure handling:
+### Guarantees
 
-```
-send() failure
-     ↓
-backend marked inactive
-     ↓
-health thread reconnects
-```
+* In-order processing per dialog
+* No cross-thread contention
+* High throughput under load
 
 ---
 
-# Performance
+## 📦 Components
 
-Expected performance on modern servers:
-
-| CPU      | TCAP Dialog TPS |
-| -------- | --------------- |
-| 4 cores  | ~80k            |
-| 8 cores  | ~150k           |
-| 16 cores | ~300k           |
-
-With kernel tuning and optimized backends:
-
-```
->500k TCAP messages/sec
-```
-
-Actual limits are often **determined by osmo-stp throughput**.
+| File                       | Purpose                     |
+| -------------------------- | --------------------------- |
+| `main.c`                   | Entry point                 |
+| `sigtran/sigtran_stack.c`  | SCCP stack integration      |
+| `router/router.c`          | Core routing logic          |
+| `router/tcap_parser.c`     | TCAP parsing                |
+| `router/sccp_gt.c`         | GT extraction/rewrite       |
+| `core/backend_server.c`    | Backend connection handling |
+| `core/worker_pool.c`       | Worker pool                 |
+| `core/transaction_table.c` | Dialog mapping              |
+| `core/msg_pool.c`          | Message memory pool         |
 
 ---
 
-# Environment
+## 🔧 Build
 
-Tested on:
+### Requirements
 
-| Component    | Version      |
-| ------------ | ------------ |
-| OS           | Ubuntu 24.04 |
-| GCC          | 13+          |
-| Kernel       | 6.x          |
-| Architecture | x86_64       |
+* gcc
+* libosmocore
+* libosmo-sigtran
+* libsctp
 
----
+### Build
 
-# Dependencies
-
-Required Osmocom libraries:
-
-| Library         | Purpose           |
-| --------------- | ----------------- |
-| libosmocore     | core utilities    |
-| libosmo-sccp    | SCCP stack        |
-| libosmo-sigtran | SIGTRAN protocols |
-
-Install base dependencies:
-
-```
-sudo apt update
-
-sudo apt install -y \
-build-essential \
-libsctp-dev \
-pkg-config \
-libosmocore-dev \
-libosmo-sccp-dev \
-libosmo-sigtran-dev \
-osmo-stp
-```
-
----
-
-# Build
-
-Clone repository:
-
-```
-git clone https://github.com/tahseenjamal/tcap_router_ubuntu.git
-cd tcap_router_ubuntu
-```
-
-Compile:
-
-```
+```bash
 make
 ```
 
-Binary produced:
+### Clean
 
-```
-tcap-router
+```bash
+make clean
 ```
 
 ---
 
-# Running the Router
+## ▶️ Run
 
-Start the router:
-
-```
+```bash
 ./tcap-router
 ```
 
-Expected output:
+Backend connections are accepted on:
 
 ```
-Starting TCAP Router
-Initializing SS7 + SCCP stack
-SCCP stack initialized
-Backend 0 connected
-Backend 1 connected
+Port: 2906
 ```
 
 ---
 
-# Configuring osmo-stp
+## ⚠️ Assumptions
 
-The router receives SCCP traffic via **SSN 146**.
-
-Install STP:
-
-```
-sudo apt install osmo-stp
-```
-
-Create configuration:
-
-```
-sudo nano /etc/osmocom/osmo-stp.cfg
-```
-
-Example configuration:
-
-```
-log stderr
- logging level debug
-
-cs7 instance 0
- point-code 0.0.1
-
- asp asp1 2905 0 m3ua
-  remote-ip 127.0.0.1
-  role asp
-
- as as1 m3ua
-  asp asp1
-  routing-key 1 0.0.0
-
-sccp
-
- sccp-address local
-  point-code 0.0.1
-  ssn 146
-
- sccp-routing
-  route on ssn 146
-   destination local
-```
-
-This tells the STP:
-
-```
-All SCCP traffic for SSN 146 → deliver locally
-```
-
-Your router registers the same SSN internally:
-
-```
-osmo_sccp_user_bind(..., 146);
-```
+* SCCP messages are primarily UDT/XUDT
+* M3UA adaptor handles full SIGTRAN responsibilities
+* Backend apps are stable M3UA clients
 
 ---
 
-# Starting osmo-stp
+## 🚧 Limitations (Current Version)
 
-Run:
-
-```
-sudo osmo-stp -c /etc/osmocom/osmo-stp.cfg
-```
-
-Expected log:
-
-```
-SCCP initialized
-M3UA stack initialized
-```
+* Partial SCCP support (no full segmentation handling)
+* Limited TCAP parsing (basic tags only)
+* No backend health checks
+* No congestion control
+* No observability (metrics/logging limited)
 
 ---
 
-# Traffic Flow
+## 🧭 Future Enhancements
 
-```
-SS7 Network
-    │
-    │ M3UA
-    ▼
-osmo-stp
-    │
-    │ SCCP SSN 146
-    ▼
-TCAP Router
-    │
-    ▼
-Backend TCAP Servers
-```
+* Prometheus metrics (TPS, latency, queue depth)
+* Backend health-aware routing
+* Weighted load balancing
+* Full SCCP (XUDT, segmentation)
+* Full TCAP ASN.1 parsing
+* High availability (active-active routers)
 
 ---
 
-# Testing
+## 💡 Use Cases
 
-Capture traffic:
-
-```
-sudo tcpdump -i any port 2905 -w sigtran.pcap
-```
-
-Possible test sources:
-
-* osmo-stp
-* SS7 simulators
-* custom TCAP generators
+* USSD platforms
+* MAP / HLR / HSS services
+* SMSC routing
+* SS7 service scaling
+* SS7 ↔ Diameter interworking
 
 ---
 
-# Current Features
+## 🧪 Testing
 
-| Feature                  | Status      |
-| ------------------------ | ----------- |
-| Dialog-aware routing     | Implemented |
-| Worker thread pool       | Implemented |
-| Lock-free queues         | Implemented |
-| Transaction table        | Implemented |
-| Backend reconnect logic  | Implemented |
-| Atomic backend state     | Implemented |
-| SCCP validation          | Implemented |
-| Dialog garbage collector | Implemented |
+Recommended validation:
 
----
+* Simulate TCAP load
+* Verify:
 
-# Future Improvements
-
-Planned enhancements:
-
-* Prometheus metrics
-* dynamic backend configuration
-* SCTP multi-homing
-* congestion control
-* cluster deployment
-* SS7 statistics interface
+  * Dialog stickiness
+  * GT rewrite correctness
+  * Backend routing consistency
+  * Failure handling
 
 ---
 
-# License
+## 📌 Summary
 
-MIT License
+This project provides:
+
+> A high-performance TCAP routing layer between SS7 (via STP) and M3UA-based backend systems.
+
+It cleanly separates:
+
+* SS7 signaling layer (handled by STP + adaptor)
+* Application logic (handled by backend systems)
 
 ---
 
-# Author
+## 🧑‍💻 Author
 
-**Tahseen Jamal**
+Tahseen Jamal
+
