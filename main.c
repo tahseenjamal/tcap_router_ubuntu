@@ -1,7 +1,7 @@
 #include <osmocom/core/select.h>
 #include <stdio.h>
 
-#include "core/backend_server.h"  // NEW
+#include "core/backend_server.h"
 #include "core/msg_pool.h"
 #include "core/transaction_table.h"
 #include "core/worker_pool.h"
@@ -10,7 +10,7 @@
 int main() {
     printf("Starting TCAP Router\n");
 
-    msg_pool_init();  // ✅ REQUIRED
+    msg_pool_init();
 
     tx_table_init();
     tx_gc_start();

@@ -11,6 +11,7 @@
 #include "../router/router.h"
 #include "../router/tcap_parser.h"
 #include "msg_pool.h"
+#include "worker_pool.h"  // ✅ FIX
 
 #define MAX_EVENTS 1024
 #define MAX_BACKENDS 1024
@@ -40,7 +41,7 @@ static void add_backend(int fd) {
 
 /* ========================================= */
 
-static void remove_backend(int fd) {
+void remove_backend(int fd) {  // ✅ FIX (not static)
     int n = atomic_load(&backend_count);
 
     for (int i = 0; i < n; i++) {
@@ -121,7 +122,6 @@ void backend_server_start(int port) {
                 continue;
             }
 
-            /* ✅ USE POOL */
             struct msgb *msg = msg_pool_get();
             if (!msg) continue;
 
@@ -136,7 +136,7 @@ void backend_server_start(int port) {
             msg->cb[0] = DIR_FROM_BACKEND;
             memcpy(&msg->cb[1], &fd, sizeof(int));
 
-            route_tcap(msg, otid, dtid, type);
+            worker_enqueue(msg, otid, dtid, type);  // ✅ FIX
         }
     }
 }

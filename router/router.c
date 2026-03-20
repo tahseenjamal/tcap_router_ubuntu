@@ -20,10 +20,13 @@
 /* Provided by sigtran */
 extern struct osmo_sccp_user *sccp_user;
 
-/* backend registry (from backend_server.c) */
+/* backend registry */
 extern int backend_fds[];
 extern atomic_int backend_count;
 extern atomic_int rr;
+
+/* ✅ NEW: needed for cleanup */
+extern void remove_backend(int fd);
 
 /* ============================================
  * Self GT
@@ -32,7 +35,7 @@ static uint8_t SELF_GT[] = {0x91, 0x88, 0x77, 0x66};
 static int SELF_GT_LEN = 4;
 
 /* ============================================
- * Safe send (NO PARTIAL WRITES)
+ * Safe send
  * ============================================ */
 static int send_full(int fd, uint8_t *buf, int len) {
     int sent = 0;
@@ -40,9 +43,7 @@ static int send_full(int fd, uint8_t *buf, int len) {
     while (sent < len) {
         int s = send(fd, buf + sent, len - sent, MSG_NOSIGNAL);
 
-        if (s <= 0) {
-            return -1;
-        }
+        if (s <= 0) return -1;
 
         sent += s;
     }
@@ -51,7 +52,7 @@ static int send_full(int fd, uint8_t *buf, int len) {
 }
 
 /* ============================================
- * Backend selection (SAFE)
+ * Backend selection
  * ============================================ */
 static int choose_backend_fd() {
     int n = atomic_load(&backend_count);
@@ -62,7 +63,6 @@ static int choose_backend_fd() {
 
     for (int k = 0; k < n; k++) {
         int fd = backend_fds[(start + k) % n];
-
         if (fd > 0) return fd;
     }
 
@@ -70,7 +70,7 @@ static int choose_backend_fd() {
 }
 
 /* ============================================
- * Extract backend fd from msg
+ * Extract backend fd
  * ============================================ */
 static inline int get_backend_fd(struct msgb *msg) {
     int fd = -1;
@@ -99,7 +99,6 @@ static uint8_t *extract_sccp_userdata(struct msgb *msg, int *len) {
     if (offset >= msg->len) return NULL;
 
     *len = msg->len - offset;
-
     return &d[offset];
 }
 
@@ -123,11 +122,13 @@ static void send_to_stp(struct msgb *msg) {
 }
 
 /* ============================================
- * Send to backend (safe)
+ * Send to backend
  * ============================================ */
 static void send_to_backend_fd(int fd, struct msgb *msg) {
     if (send_full(fd, msg->data, msg->len) < 0) {
         printf("Backend send failed fd=%d\n", fd);
+
+        remove_backend(fd);  // ✅ FIX
         close(fd);
     }
 
@@ -165,18 +166,14 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
                 return;
             }
 
-            /* Extract original GT */
             uint8_t orig_gt[32];
             int gt_len = 0;
 
-            if (extract_calling_gt(msg->data, msg->len, orig_gt, &gt_len) < 0) {
+            if (extract_calling_gt(msg->data, msg->len, orig_gt, &gt_len) < 0)
                 gt_len = 0;
-            }
 
-            /* Rewrite to SELF GT */
             rewrite_calling_gt(msg->data, msg->len, SELF_GT, SELF_GT_LEN);
 
-            /* Store dialog */
             tx_store_full(otid, backend_fd, orig_gt, gt_len);
 
         } else {
@@ -194,14 +191,10 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
 
             backend_fd = info.backend;
 
-            /* Restore GT */
-            if (info.gt_len > 0) {
+            if (info.gt_len > 0)
                 rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
-            }
 
-            if (type == 3) {
-                tx_delete(dtid);
-            }
+            if (type == 3) tx_delete(dtid);
         }
 
         send_to_backend_fd(backend_fd, msg);
@@ -223,9 +216,8 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
         uint8_t orig_gt[32];
         int gt_len = 0;
 
-        if (extract_calling_gt(msg->data, msg->len, orig_gt, &gt_len) < 0) {
+        if (extract_calling_gt(msg->data, msg->len, orig_gt, &gt_len) < 0)
             gt_len = 0;
-        }
 
         rewrite_calling_gt(msg->data, msg->len, SELF_GT, SELF_GT_LEN);
 
@@ -244,13 +236,10 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
             return;
         }
 
-        if (info.gt_len > 0) {
+        if (info.gt_len > 0)
             rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
-        }
 
-        if (type == 3) {
-            tx_delete(dtid);
-        }
+        if (type == 3) tx_delete(dtid);
     }
 
     send_to_stp(msg);
