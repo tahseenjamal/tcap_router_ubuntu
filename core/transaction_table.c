@@ -1,7 +1,7 @@
 #include "transaction_table.h"
 
-#include <errno.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -14,15 +14,14 @@
  * ========================================================= */
 
 typedef struct tx_entry {
+    uint32_t id;
+    int backend;
+    time_t ts;
 
-  uint32_t id;
-  int backend;
-  time_t ts;
+    uint8_t gt[32];
+    int gt_len;
 
-  uint8_t gt[32];
-  int gt_len;
-
-  struct tx_entry *next;
+    struct tx_entry *next;
 
 } tx_entry_t;
 
@@ -44,10 +43,10 @@ static inline int hash(uint32_t id) { return id % HASH_SIZE; }
  * ========================================================= */
 
 void tx_table_init() {
-  for (int i = 0; i < HASH_SIZE; i++) {
-    table[i] = NULL;
-    pthread_mutex_init(&locks[i], NULL);
-  }
+    for (int i = 0; i < HASH_SIZE; i++) {
+        table[i] = NULL;
+        pthread_mutex_init(&locks[i], NULL);
+    }
 }
 
 /* =========================================================
@@ -55,40 +54,40 @@ void tx_table_init() {
  * ========================================================= */
 
 void tx_store(uint32_t otid, int backend) {
-  int h = hash(otid);
+    int h = hash(otid);
 
-  pthread_mutex_lock(&locks[h]);
+    pthread_mutex_lock(&locks[h]);
 
-  tx_entry_t *e = table[h];
+    tx_entry_t *e = table[h];
 
-  /* ✅ FIX: check existing */
-  while (e) {
-    if (e->id == otid) {
-      e->backend = backend;
-      e->ts = time(NULL);
-      pthread_mutex_unlock(&locks[h]);
-      return;
+    /* ✅ FIX: check existing */
+    while (e) {
+        if (e->id == otid) {
+            e->backend = backend;
+            e->ts = time(NULL);
+            pthread_mutex_unlock(&locks[h]);
+            return;
+        }
+        e = e->next;
     }
-    e = e->next;
-  }
 
-  /* create new */
-  e = malloc(sizeof(tx_entry_t));
-  if (!e) {
+    /* create new */
+    e = malloc(sizeof(tx_entry_t));
+    if (!e) {
+        pthread_mutex_unlock(&locks[h]);
+        return;
+    }
+
+    e->id = otid;
+    e->backend = backend;
+    e->ts = time(NULL);
+
+    e->gt_len = 0;
+
+    e->next = table[h];
+    table[h] = e;
+
     pthread_mutex_unlock(&locks[h]);
-    return;
-  }
-
-  e->id = otid;
-  e->backend = backend;
-  e->ts = time(NULL);
-
-  e->gt_len = 0;
-
-  e->next = table[h];
-  table[h] = e;
-
-  pthread_mutex_unlock(&locks[h]);
 }
 
 /* =========================================================
@@ -96,56 +95,53 @@ void tx_store(uint32_t otid, int backend) {
  * ========================================================= */
 
 void tx_store_full(uint32_t otid, int backend, uint8_t *gt, int gt_len) {
-  int h = hash(otid);
+    int h = hash(otid);
 
-  pthread_mutex_lock(&locks[h]);
+    pthread_mutex_lock(&locks[h]);
 
-  tx_entry_t *e = table[h];
+    tx_entry_t *e = table[h];
 
-  /* ✅ FIX: update existing */
-  while (e) {
-    if (e->id == otid) {
+    /* ✅ FIX: update existing */
+    while (e) {
+        if (e->id == otid) {
+            e->backend = backend;
+            e->ts = time(NULL);
 
-      e->backend = backend;
-      e->ts = time(NULL);
+            if (gt && gt_len > 0) {
+                if (gt_len > 32) gt_len = 32;  // ✅ FIX
+                e->gt_len = gt_len;
+                memcpy(e->gt, gt, gt_len);
+            }
 
-      if (gt && gt_len > 0) {
-        if (gt_len > 32)
-          gt_len = 32; // ✅ FIX
+            pthread_mutex_unlock(&locks[h]);
+            return;
+        }
+        e = e->next;
+    }
+
+    /* create new */
+    e = malloc(sizeof(tx_entry_t));
+    if (!e) {
+        pthread_mutex_unlock(&locks[h]);
+        return;
+    }
+
+    e->id = otid;
+    e->backend = backend;
+    e->ts = time(NULL);
+
+    if (gt && gt_len > 0) {
+        if (gt_len > 32) gt_len = 32;  // ✅ FIX
         e->gt_len = gt_len;
         memcpy(e->gt, gt, gt_len);
-      }
-
-      pthread_mutex_unlock(&locks[h]);
-      return;
+    } else {
+        e->gt_len = 0;
     }
-    e = e->next;
-  }
 
-  /* create new */
-  e = malloc(sizeof(tx_entry_t));
-  if (!e) {
+    e->next = table[h];
+    table[h] = e;
+
     pthread_mutex_unlock(&locks[h]);
-    return;
-  }
-
-  e->id = otid;
-  e->backend = backend;
-  e->ts = time(NULL);
-
-  if (gt && gt_len > 0) {
-    if (gt_len > 32)
-      gt_len = 32; // ✅ FIX
-    e->gt_len = gt_len;
-    memcpy(e->gt, gt, gt_len);
-  } else {
-    e->gt_len = 0;
-  }
-
-  e->next = table[h];
-  table[h] = e;
-
-  pthread_mutex_unlock(&locks[h]);
 }
 
 /* =========================================================
@@ -153,28 +149,27 @@ void tx_store_full(uint32_t otid, int backend, uint8_t *gt, int gt_len) {
  * ========================================================= */
 
 int tx_lookup(uint32_t dtid) {
-  int h = hash(dtid);
+    int h = hash(dtid);
 
-  pthread_mutex_lock(&locks[h]);
+    pthread_mutex_lock(&locks[h]);
 
-  tx_entry_t *e = table[h];
+    tx_entry_t *e = table[h];
 
-  while (e) {
-    if (e->id == dtid) {
+    while (e) {
+        if (e->id == dtid) {
+            e->ts = time(NULL);  // ✅ CRITICAL FIX
 
-      e->ts = time(NULL); // ✅ CRITICAL FIX
+            int backend = e->backend;
 
-      int backend = e->backend;
+            pthread_mutex_unlock(&locks[h]);
+            return backend;
+        }
 
-      pthread_mutex_unlock(&locks[h]);
-      return backend;
+        e = e->next;
     }
 
-    e = e->next;
-  }
-
-  pthread_mutex_unlock(&locks[h]);
-  return -1;
+    pthread_mutex_unlock(&locks[h]);
+    return -1;
 }
 
 /* =========================================================
@@ -182,32 +177,30 @@ int tx_lookup(uint32_t dtid) {
  * ========================================================= */
 
 int tx_lookup_full(uint32_t dtid, tx_info_t *out) {
-  int h = hash(dtid);
+    int h = hash(dtid);
 
-  pthread_mutex_lock(&locks[h]);
+    pthread_mutex_lock(&locks[h]);
 
-  tx_entry_t *e = table[h];
+    tx_entry_t *e = table[h];
 
-  while (e) {
-    if (e->id == dtid) {
+    while (e) {
+        if (e->id == dtid) {
+            e->ts = time(NULL);  // ✅ CRITICAL FIX
 
-      e->ts = time(NULL); // ✅ CRITICAL FIX
+            out->backend = e->backend;
+            out->gt_len = e->gt_len;
 
-      out->backend = e->backend;
-      out->gt_len = e->gt_len;
+            if (e->gt_len > 0) memcpy(out->gt, e->gt, e->gt_len);
 
-      if (e->gt_len > 0)
-        memcpy(out->gt, e->gt, e->gt_len);
+            pthread_mutex_unlock(&locks[h]);
+            return 0;
+        }
 
-      pthread_mutex_unlock(&locks[h]);
-      return 0;
+        e = e->next;
     }
 
-    e = e->next;
-  }
-
-  pthread_mutex_unlock(&locks[h]);
-  return -1;
+    pthread_mutex_unlock(&locks[h]);
+    return -1;
 }
 
 /* =========================================================
@@ -215,26 +208,25 @@ int tx_lookup_full(uint32_t dtid, tx_info_t *out) {
  * ========================================================= */
 
 void tx_delete(uint32_t id) {
-  int h = hash(id);
+    int h = hash(id);
 
-  pthread_mutex_lock(&locks[h]);
+    pthread_mutex_lock(&locks[h]);
 
-  tx_entry_t **cur = &table[h];
+    tx_entry_t **cur = &table[h];
 
-  while (*cur) {
-    if ((*cur)->id == id) {
+    while (*cur) {
+        if ((*cur)->id == id) {
+            tx_entry_t *tmp = *cur;
+            *cur = tmp->next;
 
-      tx_entry_t *tmp = *cur;
-      *cur = tmp->next;
+            free(tmp);
+            break;
+        }
 
-      free(tmp);
-      break;
+        cur = &(*cur)->next;
     }
 
-    cur = &(*cur)->next;
-  }
-
-  pthread_mutex_unlock(&locks[h]);
+    pthread_mutex_unlock(&locks[h]);
 }
 
 /* =========================================================
@@ -242,42 +234,38 @@ void tx_delete(uint32_t id) {
  * ========================================================= */
 
 static void *gc_thread(void *arg) {
-  (void)arg;
+    (void)arg;
 
-  while (1) {
+    while (1) {
+        sleep(5);
 
-    sleep(5);
+        time_t now = time(NULL);
 
-    time_t now = time(NULL);
+        for (int i = 0; i < HASH_SIZE; i++) {
+            pthread_mutex_lock(&locks[i]);
 
-    for (int i = 0; i < HASH_SIZE; i++) {
+            tx_entry_t **cur = &table[i];
 
-      pthread_mutex_lock(&locks[i]);
+            while (*cur) {
+                if (now - (*cur)->ts > TX_TIMEOUT) {
+                    tx_entry_t *tmp = *cur;
 
-      tx_entry_t **cur = &table[i];
+                    printf("TX TIMEOUT id=%u backend=%d age=%ld sec\n", tmp->id,
+                           tmp->backend, now - tmp->ts);
 
-      while (*cur) {
+                    *cur = tmp->next;
+                    free(tmp);
 
-        if (now - (*cur)->ts > TX_TIMEOUT) {
+                } else {
+                    cur = &(*cur)->next;
+                }
+            }
 
-          tx_entry_t *tmp = *cur;
-
-          printf("TX TIMEOUT id=%u backend=%d age=%ld sec\n", tmp->id,
-                 tmp->backend, now - tmp->ts);
-
-          *cur = tmp->next;
-          free(tmp);
-
-        } else {
-          cur = &(*cur)->next;
+            pthread_mutex_unlock(&locks[i]);
         }
-      }
-
-      pthread_mutex_unlock(&locks[i]);
     }
-  }
 
-  return NULL;
+    return NULL;
 }
 
 /* =========================================================
@@ -285,12 +273,12 @@ static void *gc_thread(void *arg) {
  * ========================================================= */
 
 void tx_gc_start() {
-  pthread_t t;
+    pthread_t t;
 
-  if (pthread_create(&t, NULL, gc_thread, NULL) != 0) {
-    perror("gc thread create failed");
-    return;
-  }
+    if (pthread_create(&t, NULL, gc_thread, NULL) != 0) {
+        perror("gc thread create failed");
+        return;
+    }
 
-  pthread_detach(t);
+    pthread_detach(t);
 }
