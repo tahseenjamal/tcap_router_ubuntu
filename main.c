@@ -8,20 +8,23 @@
 #include "sigtran/sigtran_stack.h"
 
 int main() {
-    printf("Starting TCAP Router\n");
+  printf("Starting TCAP Router\n");
 
-    msg_pool_init();
+  msg_pool_init();
 
-    tx_table_init();
-    tx_gc_start();
+  tx_table_init();
+  tx_gc_start();
 
-    worker_pool_init();
+  worker_pool_init();
 
-    sigtran_start();
+  /* SIGTRAN → connects to osmo-stp */
+  sigtran_start();
 
-    backend_server_start(2906);
+  /* Backend apps connect here */
+  backend_server_start(2906);
 
-    while (1) osmo_select_main(0);
+  while (1)
+    osmo_select_main(0);
 
-    return 0;
+  return 0;
 }
