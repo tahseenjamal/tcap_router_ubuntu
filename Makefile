@@ -23,6 +23,8 @@ all: $(TARGET)
 
 $(TARGET): $(OBJ)
 	$(CC) $(OBJ) -o $(TARGET) $(LIBS) -pthread
+	@echo "Build complete → cleaning intermediate files"
+	@rm -f $(OBJ)
 
 clean:
 	rm -f $(TARGET) $(OBJ)
