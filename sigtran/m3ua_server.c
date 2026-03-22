@@ -31,8 +31,7 @@ static uint8_t *extract_sccp_from_m3ua(uint8_t *buf, int len, int *out_len) {
   if (h->version != M3UA_VERSION)
     return NULL;
 
-  if (h->msg_class != M3UA_CLASS_TRANSFER ||
-      h->msg_type != M3UA_DATA)
+  if (h->msg_class != M3UA_CLASS_TRANSFER || h->msg_type != M3UA_DATA)
     return NULL;
 
   int mlen = ntohl(h->length);
@@ -193,7 +192,17 @@ void m3ua_server_start(int port) {
       uint8_t *sccp = extract_sccp_from_m3ua(buf, r, &sccp_len);
 
       if (!sccp) {
-        printf("DROP: invalid M3UA (no SCCP) fd=%d len=%d\n", fd, r);
+
+        m3ua_hdr_t *h = (m3ua_hdr_t *)buf;
+
+        if (h->msg_class == M3UA_CLASS_TRANSFER) {
+          printf("DROP: invalid DATA (no SCCP) fd=%d len=%d\n", fd, r);
+        } else {
+          /* control plane message (ASPUP/ASPAC etc) */
+          printf("M3UA CTRL msg: class=%d type=%d len=%d\n", h->msg_class,
+                 h->msg_type, r);
+        }
+
         continue;
       }
 
