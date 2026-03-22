@@ -8,7 +8,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "../core/backend_server.h"
 #include "../core/msg_pool.h"
 #include "../core/worker_pool.h"
 #include "../router/tcap_parser.h"
@@ -19,36 +18,69 @@
 #define DIR_FROM_BACKEND 1
 
 /* ===================================== */
-/* SAFE M3UA PARSER */
+/* M3UA → SCCP EXTRACTOR (RFC4666 style) */
 /* ===================================== */
 
-static uint8_t *extract_m3ua_payload(uint8_t *buf, int len, int *out_len) {
+static uint8_t *extract_sccp_from_m3ua(uint8_t *buf, int len, int *out_len) {
   if (!buf || len < (int)sizeof(m3ua_hdr_t))
     return NULL;
 
   m3ua_hdr_t *h = (m3ua_hdr_t *)buf;
 
-  /* version check */
+  /* basic validation */
   if (h->version != M3UA_VERSION)
     return NULL;
 
-  /* only DATA supported */
-  if (h->msg_class != M3UA_CLASS_TRANSFER || h->msg_type != M3UA_DATA)
+  if (h->msg_class != M3UA_CLASS_TRANSFER ||
+      h->msg_type != M3UA_DATA)
     return NULL;
 
-  /* length validation */
   int mlen = ntohl(h->length);
 
-  if (mlen <= (int)sizeof(m3ua_hdr_t) || mlen > len)
+  if (mlen > len || mlen < (int)sizeof(m3ua_hdr_t))
     return NULL;
 
-  int payload_len = mlen - sizeof(m3ua_hdr_t);
+  /* start of TLVs */
+  uint8_t *p = buf + sizeof(m3ua_hdr_t);
+  int remain = mlen - sizeof(m3ua_hdr_t);
 
-  if (payload_len <= 0)
-    return NULL;
+  while (remain > 4) {
 
-  *out_len = payload_len;
-  return buf + sizeof(m3ua_hdr_t);
+    uint16_t tag = ntohs(*(uint16_t *)p);
+    uint16_t plen = ntohs(*(uint16_t *)(p + 2));
+
+    if (plen < 4 || plen > remain)
+      return NULL;
+
+    /* =====================================
+     * PROTOCOL DATA (0x0210)
+     * ===================================== */
+    if (tag == 0x0210) {
+
+      uint8_t *pd = p + 4;
+
+      if (plen < 16) /* 4 (TLV hdr) + 12 (MTP3) */
+        return NULL;
+
+      /* skip MTP3 header (12 bytes) */
+      uint8_t *sccp = pd + 12;
+
+      int sccp_len = plen - 4 - 12;
+
+      if (sccp_len <= 0)
+        return NULL;
+
+      *out_len = sccp_len;
+      return sccp;
+    }
+
+    /* move to next TLV (4-byte aligned) */
+    int aligned = (plen + 3) & ~3;
+    p += aligned;
+    remain -= aligned;
+  }
+
+  return NULL;
 }
 
 /* ===================================== */
@@ -154,14 +186,14 @@ void m3ua_server_start(int port) {
       }
 
       /* =====================================
-       * M3UA PARSE
+       * M3UA PARSE (FIXED)
        * ===================================== */
 
       int sccp_len = 0;
-      uint8_t *sccp = extract_m3ua_payload(buf, r, &sccp_len);
+      uint8_t *sccp = extract_sccp_from_m3ua(buf, r, &sccp_len);
 
       if (!sccp) {
-        printf("DROP: invalid M3UA from fd=%d len=%d\n", fd, r);
+        printf("DROP: invalid M3UA (no SCCP) fd=%d len=%d\n", fd, r);
         continue;
       }
 
