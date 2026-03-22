@@ -70,7 +70,7 @@ static int choose_backend_fd() {
 /* ============================================
  * Extract backend fd
  * ============================================ */
-static inline int get_backend_fd(struct msgb *msg) {
+static inline int get_backend_fd(msg_t *msg) {
   int fd = -1;
   memcpy(&fd, &msg->cb[1], sizeof(int));
   return fd;
@@ -105,7 +105,7 @@ static uint8_t *extract_sccp_userdata(uint8_t *d, int len, int *out_len) {
 /* ============================================
  * Send to STP (M3UA)
  * ============================================ */
-static void send_to_stp(struct msgb *msg) {
+static void send_to_stp(msg_t *msg) {
   if (m3ua_send(msg->data, msg->len) < 0) {
     printf("STP send failed\n");
   }
@@ -115,7 +115,7 @@ static void send_to_stp(struct msgb *msg) {
 /* ============================================
  * Send to backend
  * ============================================ */
-static void send_to_backend_fd(int fd, struct msgb *msg) {
+static void send_to_backend_fd(int fd, msg_t *msg) {
   if (send_full(fd, msg->data, msg->len) < 0) {
     printf("Backend send failed fd=%d\n", fd);
     remove_backend(fd);
@@ -128,7 +128,7 @@ static void send_to_backend_fd(int fd, struct msgb *msg) {
 /* ============================================
  * MAIN ROUTER
  * ============================================ */
-void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
+void route_tcap(msg_t *msg, uint32_t otid, uint32_t dtid, int type) {
 
   int direction = msg->cb[0];
 
@@ -136,8 +136,6 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
    * BACKEND → STP
    * ============================================ */
   if (direction == DIR_FROM_BACKEND) {
-
-    int backend_fd = get_backend_fd(msg);
 
     if (msg->len <= 0) {
       msg_pool_put(msg);

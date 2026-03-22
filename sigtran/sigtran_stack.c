@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "../core/msg_pool.h"
 #include "../core/worker_pool.h"
@@ -35,7 +36,7 @@ void *stp_reader(void *arg) {
     uint8_t *sccp = buf + sizeof(m3ua_hdr_t);
     sccp_len = r - sizeof(m3ua_hdr_t);
 
-    struct msgb *msg = msg_pool_get();
+    msg_t *msg = msg_pool_get();
     memcpy(msg->data, sccp, sccp_len);
     msg->len = sccp_len;
 

@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "../core/backend_server.h"
 #include "../core/msg_pool.h"
 #include "../core/worker_pool.h"
 #include "../router/tcap_parser.h"
@@ -173,7 +174,7 @@ void m3ua_server_start(int port) {
        * MSG ALLOC
        * ===================================== */
 
-      struct msgb *msg = msg_pool_get();
+      msg_t *msg = msg_pool_get();
       if (!msg) {
         printf("DROP: msg pool exhausted\n");
         continue;

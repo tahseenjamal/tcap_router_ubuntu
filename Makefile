@@ -2,13 +2,14 @@ CC = gcc
 TARGET = tcap-router
 
 CFLAGS = -O2 -Wall -pthread
-LIBS = -lsctp -losomocore
+LIBS = -lsctp 
 
 SRC = \
 main.c \
 core/worker_pool.c \
 core/msg_pool.c \
 core/transaction_table.c \
+core/backend_registry.c \
 router/router.c \
 router/tcap_parser.c \
 router/sccp_gt.c \
