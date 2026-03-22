@@ -1,8 +1,5 @@
 #include "router.h"
 
-#include <osmocom/core/msgb.h>
-#include <osmocom/core/prim.h>
-#include <osmocom/sigtran/sccp_sap.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -17,15 +14,15 @@
 #define DIR_FROM_STP 0
 #define DIR_FROM_BACKEND 1
 
-/* Provided by sigtran */
-extern struct osmo_sccp_user *sccp_user;
+/* M3UA send (to STP) */
+extern int m3ua_send(uint8_t *data, int len);
 
 /* backend registry */
 extern int backend_fds[];
 extern atomic_int backend_count;
 extern atomic_int rr;
 
-/* needed for cleanup */
+/* cleanup */
 extern void remove_backend(int fd);
 
 /* ============================================
@@ -35,7 +32,7 @@ static uint8_t SELF_GT[] = {0x91, 0x88, 0x77, 0x66};
 static int SELF_GT_LEN = 4;
 
 /* ============================================
- * Safe send
+ * Safe send (to backend)
  * ============================================ */
 static int send_full(int fd, uint8_t *buf, int len) {
   int sent = 0;
@@ -71,7 +68,7 @@ static int choose_backend_fd() {
 }
 
 /* ============================================
- * Extract backend fd (from msg->cb)
+ * Extract backend fd
  * ============================================ */
 static inline int get_backend_fd(struct msgb *msg) {
   int fd = -1;
@@ -106,23 +103,13 @@ static uint8_t *extract_sccp_userdata(uint8_t *d, int len, int *out_len) {
 }
 
 /* ============================================
- * Send to STP
+ * Send to STP (M3UA)
  * ============================================ */
 static void send_to_stp(struct msgb *msg) {
-  if (!sccp_user) {
-    printf("DROP: sccp_user not ready\n");
-    msg_pool_put(msg);
-    return;
+  if (m3ua_send(msg->data, msg->len) < 0) {
+    printf("STP send failed\n");
   }
-
-  struct osmo_prim_hdr oph;
-  memset(&oph, 0, sizeof(oph));
-
-  oph.primitive = OSMO_SCU_PRIM_N_DATA;
-  oph.operation = PRIM_OP_REQUEST;
-  oph.msg = msg;
-
-  osmo_sccp_user_sap_down(sccp_user, &oph);
+  msg_pool_put(msg);
 }
 
 /* ============================================
@@ -146,44 +133,22 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
   int direction = msg->cb[0];
 
   /* ============================================
-   * BACKEND → STP (strip FD header)
+   * BACKEND → STP
    * ============================================ */
   if (direction == DIR_FROM_BACKEND) {
 
-    if (msg->len < 4) {
-      printf("DROP: backend msg too small\n");
-      msg_pool_put(msg);
-      return;
-    }
+    int backend_fd = get_backend_fd(msg);
 
-    int backend_fd = -1;
-    memcpy(&backend_fd, msg->data, sizeof(int));
-
-    /* store fd in cb */
-    memcpy(&msg->cb[1], &backend_fd, sizeof(int));
-
-    /* strip header */
-    uint8_t *d = msg->data + 4;
-    int len = msg->len - 4;
-
-    if (len <= 0) {
+    if (msg->len <= 0) {
       msg_pool_put(msg);
       return;
     }
 
     int tcap_len = 0;
-    uint8_t *tcap = extract_sccp_userdata(d, len, &tcap_len);
+    uint8_t *tcap = extract_sccp_userdata(msg->data, msg->len, &tcap_len);
 
     if (!tcap) {
       printf("DROP: invalid SCCP payload (backend)\n");
-      msg_pool_put(msg);
-      return;
-    }
-
-    int is_begin = (type == 1 && otid != 0);
-
-    if (is_begin) {
-      printf("WARN: backend sent BEGIN, dropping\n");
       msg_pool_put(msg);
       return;
     }
@@ -203,14 +168,10 @@ void route_tcap(struct msgb *msg, uint32_t otid, uint32_t dtid, int type) {
     }
 
     if (info.gt_len > 0)
-      rewrite_calling_gt(d, len, info.gt, info.gt_len);
+      rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
 
     if (type == 3 || type == 2)
       tx_delete(dtid);
-
-    /* IMPORTANT: adjust msg buffer */
-    memmove(msg->data, d, len);
-    msg->len = len;
 
     send_to_stp(msg);
     return;
