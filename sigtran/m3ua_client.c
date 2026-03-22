@@ -13,6 +13,59 @@
 
 int m3ua_sock = -1;
 
+static int send_ctrl(uint8_t msg_class, uint8_t msg_type) {
+  uint8_t buf[8] = {0};
+
+  m3ua_hdr_t *h = (m3ua_hdr_t *)buf;
+
+  h->version = 1;
+  h->reserved = 0;
+  h->msg_class = msg_class;
+  h->msg_type = msg_type;
+  h->length = htonl(8);
+
+  struct msghdr msg = {0};
+  struct iovec iov;
+
+  char cmsgbuf[CMSG_SPACE(sizeof(struct sctp_sndrcvinfo))];
+  memset(cmsgbuf, 0, sizeof(cmsgbuf));
+
+  iov.iov_base = buf;
+  iov.iov_len = 8;
+
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+
+  msg.msg_control = cmsgbuf;
+  msg.msg_controllen = sizeof(cmsgbuf);
+
+  struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+
+  cmsg->cmsg_level = IPPROTO_SCTP;
+  cmsg->cmsg_type = SCTP_SNDRCV;
+  cmsg->cmsg_len = CMSG_LEN(sizeof(struct sctp_sndrcvinfo));
+
+  struct sctp_sndrcvinfo *sinfo = (struct sctp_sndrcvinfo *)CMSG_DATA(cmsg);
+
+  memset(sinfo, 0, sizeof(*sinfo));
+  sinfo->sinfo_stream = 0;
+  sinfo->sinfo_ppid = htonl(3);
+
+  msg.msg_controllen = cmsg->cmsg_len;
+
+  return sendmsg(m3ua_sock, &msg, 0);
+}
+
+static void send_aspup() {
+  printf("Sending ASPUP\n");
+  send_ctrl(3, 1); // ASPSM / ASPUP
+}
+
+static void send_aspac() {
+  printf("Sending ASPAC\n");
+  send_ctrl(4, 1); // ASPTM / ASPAC
+}
+
 /* ===================================== */
 /* CONNECT */
 /* ===================================== */
@@ -40,6 +93,13 @@ int m3ua_client_connect(const char *ip, int port) {
   }
 
   printf("Connected to STP %s:%d\n", ip, port);
+
+  /* 🔥 CRITICAL: bring ASP UP */
+  sleep(1);
+  send_aspup();
+
+  sleep(1);
+  send_aspac();
   return 0;
 }
 
@@ -137,8 +197,7 @@ int m3ua_send(uint8_t *sccp, int sccp_len) {
   cmsg->cmsg_type = SCTP_SNDRCV;
   cmsg->cmsg_len = CMSG_LEN(sizeof(struct sctp_sndrcvinfo));
 
-  struct sctp_sndrcvinfo *sinfo =
-      (struct sctp_sndrcvinfo *)CMSG_DATA(cmsg);
+  struct sctp_sndrcvinfo *sinfo = (struct sctp_sndrcvinfo *)CMSG_DATA(cmsg);
 
   memset(sinfo, 0, sizeof(*sinfo));
   sinfo->sinfo_stream = 0;
