@@ -39,7 +39,7 @@ void msg_pool_put(msg_t *msg) {
 
   int t = atomic_fetch_add(&top, 1);
 
-  if (t < POOL_SIZE) {
+  if (t >= 0 && t < POOL_SIZE) {
     pool[t] = msg;
   } else {
     free(msg);

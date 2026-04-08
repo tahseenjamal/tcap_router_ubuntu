@@ -2,12 +2,14 @@
 
 #include <arpa/inet.h>
 #include <netinet/sctp.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "../core/backend_registry.h"
 #include "../core/msg_pool.h"
 #include "../core/worker_pool.h"
 #include "../router/tcap_parser.h"
@@ -163,6 +165,7 @@ void m3ua_server_start(int port) {
           continue;
         }
 
+        add_backend(client);
         printf("Backend connected fd=%d\n", client);
         continue;
       }
@@ -180,7 +183,7 @@ void m3ua_server_start(int port) {
       if (r <= 0) {
         printf("Backend disconnected fd=%d\n", fd);
         epoll_ctl(ep, EPOLL_CTL_DEL, fd, NULL);
-        close(fd);
+        remove_backend(fd);
         continue;
       }
 
@@ -254,7 +257,7 @@ void m3ua_server_start(int port) {
 /* ===================================== */
 
 void *m3ua_server_thread(void *arg) {
-  int port = *(int *)arg;
+  int port = (int)(intptr_t)arg;
   m3ua_server_start(port);
   return NULL;
 }

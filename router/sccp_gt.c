@@ -54,12 +54,12 @@ int extract_calling_gt(uint8_t *sccp, int len, uint8_t *gt, int *gt_len) {
     return parse_address(&sccp[ptr], len - ptr, gt, gt_len, 0, NULL, 0);
 }
 
-void rewrite_calling_gt(uint8_t *sccp, int len, uint8_t *new_gt, int new_len) {
-    if (len < 5) return;
+int rewrite_calling_gt(uint8_t *sccp, int len, uint8_t *new_gt, int new_len) {
+    if (len < 5) return -1;
 
     uint8_t ptr = sccp[2];
 
-    if (ptr == 0 || ptr >= len) return;
+    if (ptr == 0 || ptr >= len) return -1;
 
-    parse_address(&sccp[ptr], len - ptr, NULL, NULL, 1, new_gt, new_len);
+    return parse_address(&sccp[ptr], len - ptr, NULL, NULL, 1, new_gt, new_len);
 }

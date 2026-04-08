@@ -1,4 +1,5 @@
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
 
@@ -22,8 +23,7 @@ int main() {
 
   /* Run M3UA server in thread */
   pthread_t t;
-  int port = 2906;
-  pthread_create(&t, NULL, m3ua_server_thread, &port);
+  pthread_create(&t, NULL, m3ua_server_thread, (void *)(intptr_t)2906);
   pthread_detach(t);
 
 

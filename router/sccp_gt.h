@@ -5,7 +5,7 @@
 
 int extract_calling_gt(uint8_t* sccp, int len, uint8_t* gt, int* gt_len);
 
-void rewrite_calling_gt(uint8_t* sccp, int len,
-                        uint8_t* new_gt, int new_len);
+int rewrite_calling_gt(uint8_t* sccp, int len,
+                       uint8_t* new_gt, int new_len);
 
 #endif

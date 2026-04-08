@@ -127,7 +127,6 @@ static void send_to_backend_fd(int fd, msg_t *msg) {
     if (send_full(fd, msg->data, msg->len) < 0) {
         printf("Backend send failed fd=%d\n", fd);
         remove_backend(fd);
-        close(fd);
     }
     msg_pool_put(msg);
 }
@@ -201,8 +200,13 @@ void route_tcap(msg_t *msg, uint32_t _otid, uint32_t _dtid, int _type) {
             return;
         }
 
-        if (info.gt_len > 0)
-            rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
+        if (info.gt_len > 0) {
+            if (rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len) < 0) {
+                printf("DROP: GT rewrite failed (BACKEND→STP)\n");
+                msg_pool_put(msg);
+                return;
+            }
+        }
 
         if (type == 3 || type == 2)
             tx_delete(dtid);
@@ -233,7 +237,11 @@ void route_tcap(msg_t *msg, uint32_t _otid, uint32_t _dtid, int _type) {
         if (extract_calling_gt(msg->data, msg->len, orig_gt, &gt_len) < 0)
             gt_len = 0;
 
-        rewrite_calling_gt(msg->data, msg->len, SELF_GT, SELF_GT_LEN);
+        if (rewrite_calling_gt(msg->data, msg->len, SELF_GT, SELF_GT_LEN) < 0) {
+            printf("DROP: GT rewrite failed (STP→BACKEND BEGIN)\n");
+            msg_pool_put(msg);
+            return;
+        }
 
         tx_store_full(otid, backend_fd, orig_gt, gt_len);
 
@@ -255,8 +263,13 @@ void route_tcap(msg_t *msg, uint32_t _otid, uint32_t _dtid, int _type) {
 
         backend_fd = info.backend;
 
-        if (info.gt_len > 0)
-            rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len);
+        if (info.gt_len > 0) {
+            if (rewrite_calling_gt(msg->data, msg->len, info.gt, info.gt_len) < 0) {
+                printf("DROP: GT rewrite failed (STP→BACKEND)\n");
+                msg_pool_put(msg);
+                return;
+            }
+        }
 
         if (type == 3 || type == 2)
             tx_delete(dtid);
